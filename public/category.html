@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>分类 · 青简</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body data-page="category">
+  <header class="topbar">
+    <span class="logo">青简</span>
+    <form class="search" onsubmit="return false">
+      <input type="search" placeholder="搜索书名/作者" aria-label="搜索">
+      <button type="button" aria-label="搜索">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      </button>
+    </form>
+  </header>
+
+  <div class="wrap">
+    <a class="back-link" href="/">‹ 返回首页</a>
+    <div class="section-title" id="catName">分类</div>
+    <div id="books"><div class="empty">加载中…</div></div>
+  </div>
+
+  <div id="error" class="empty"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

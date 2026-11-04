@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>我的书架 · 青简</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body data-page="shelf">
+  <header class="topbar">
+    <span class="logo">青简</span>
+    <form class="search" onsubmit="return false">
+      <input type="search" placeholder="搜索书名/作者" aria-label="搜索">
+      <button type="button" aria-label="搜索">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      </button>
+    </form>
+  </header>
+
+  <div class="wrap">
+    <div class="tabs" id="shelfTabs">
+      <button class="tab on" data-tab="shelf" type="button">书架</button>
+      <button class="tab" data-tab="history" type="button">历史</button>
+    </div>
+
+    <div id="shelfPane">
+      <div class="section-title">我的书架 <span class="more" id="bmCount"></span></div>
+      <div id="shelf"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div id="historyPane" hidden>
+      <div class="section-title">阅读历史 <span class="more" id="histCount"></span></div>
+      <div id="history"></div>
+      <div style="text-align:center;margin-top:14px">
+        <button class="linkbtn" id="clearHist" type="button">清空历史</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="error" class="empty"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

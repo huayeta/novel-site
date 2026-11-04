@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>阅读 · 青简</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body data-page="read">
+  <div class="reader">
+    <a class="back-link" href="/" id="readBack">‹ 目录</a>
+    <h1 class="title" id="chapterTitle">章节</h1>
+    <div class="reader-meta" id="readerMeta"></div>
+    <div class="reader-tools" id="readerTools">
+      <button id="fsMinus" type="button" aria-label="减小字号">A−</button>
+      <button id="fsPlus" type="button" aria-label="增大字号">A＋</button>
+      <button id="lhBtn" type="button">行距</button>
+      <button id="themeDay" type="button">日间</button>
+      <button id="themeNight" type="button">夜间</button>
+      <button id="themeEye" type="button">护眼</button>
+    </div>
+    <div class="content" id="content"><div class="empty">加载中…</div></div>
+  </div>
+
+  <nav class="reader-nav" id="readerNav"></nav>
+
+  <div class="overlay" id="tocOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>目录</span>
+        <input id="tocFilter" class="toc-filter" type="search" placeholder="搜索章节名…" autocomplete="off">
+        <span class="muted" id="tocCount"></span>
+        <button id="tocClose" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="sheet-body" id="tocList"></div>
+      <div class="toc-pager" id="tocPager"></div>
+    </div>
+  </div>
+
+  <div id="error" class="empty"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

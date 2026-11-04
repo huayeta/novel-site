@@ -45,11 +45,24 @@ const wrap = (fn) => (req, res) =>
 
 // 带缓存的 JSON 接口：key 用完整 URL（含全部 query，天然按 src/page/sort/q 隔离）。
 // 成功且「有有效数据」才写缓存；失败/空结果不入缓存（响应头也在成功后才设置）。
+// M4：Cache-Control 用缓存条目「剩余寿命」，前端据此把本地 TTL 夹到不超过剩余，
+// 避免前端 10min + 服务端剩余 10min 叠成 20min 的陈旧窗口。
 const withCache = (ttlMs, producer) =>
   wrap(async (req, res) => {
-    res.set('X-Cache', apiCache.peek(req.originalUrl) ? 'HIT' : 'MISS');
+    const hitBefore = apiCache.peek(req.originalUrl);
+    res.set('X-Cache', hitBefore ? 'HIT' : 'MISS');
     const data = await apiCache.get(req.originalUrl, ttlMs, () => producer(req));
-    res.set('Cache-Control', `public, max-age=${Math.floor(ttlMs / 1000)}`);
+    const leftMs = apiCache.remaining(req.originalUrl);
+    if (leftMs > 0) {
+      // 命中/新写入：浏览器缓存不超过服务端缓存的剩余寿命（M4 防叠加）
+      const maxAge = Math.max(1, Math.floor(leftMs / 1000));
+      res.set('Cache-Control', `public, max-age=${maxAge}`);
+      res.set('X-Cache-Remaining', String(maxAge));
+    } else {
+      // 空结果/不可缓存：一层都不留，避免空列表被冻结
+      res.set('Cache-Control', 'no-store');
+      res.set('X-Cache-Remaining', '0');
+    }
     res.json(data);
   });
 
@@ -98,13 +111,27 @@ app.get(
         hasPrev: pg.hasPrev,
         paginated: true,
       };
+      // M9：源站分页有时误报 totalPages（末页抓到空页）。向前回退最多 2 页找
+      // 真正有内容的末页，避免「最新：xxx」消失，也避免把空页错当末页缓存。
       let lastItems = null;
+      let effLastPage = pg.totalPages;
       if (pg.totalPages <= 1) lastItems = pg.items;
       else {
-        try {
-          const last = await source.getChaptersPage(id, pg.totalPages);
-          if (last.items && last.items.length) lastItems = last.items;
-        } catch (e) {} // 末页失败则不臆造最新章节
+        for (let p = pg.totalPages; p >= Math.max(1, pg.totalPages - 2); p--) {
+          try {
+            const last = await source.getChaptersPage(id, p);
+            if (last.items && last.items.length) {
+              lastItems = last.items;
+              effLastPage = p;
+              break;
+            }
+          } catch (e) { /* 该页失败则继续向前回退 */ }
+        }
+      }
+      // 找到有效末页后修正分页信息，前端翻页器不会指向空页
+      if (effLastPage !== pg.totalPages) {
+        pager.totalPages = effLastPage;
+        pager.hasNext = false;
       }
       if (lastItems && lastItems.length) {
         const l = lastItems[lastItems.length - 1];
@@ -112,8 +139,8 @@ app.get(
       }
       const perPage = pg.pageSize || 20;
       totalChapters =
-        pg.totalPages > 1
-          ? (pg.totalPages - 1) * perPage + (lastItems ? lastItems.length : perPage)
+        effLastPage > 1
+          ? (effLastPage - 1) * perPage + (lastItems ? lastItems.length : perPage)
           : chapters.length;
     } else {
       chapters = await source.getChapters(id);
@@ -186,6 +213,8 @@ app.get(
             items: pg.items,
           };
         }
+        // L3：非分页源（keca/ibq）前端从不调用本接口（目录直接来自 /api/book 的全量
+        // chapters）。此分支仅保留为通用 API / 未来接入分页时用，切片本身仍是追加式安全的。
         const all = await source.getChapters(id);
         const pageSize = 200;
         const totalPages = Math.max(1, Math.ceil(all.length / pageSize));

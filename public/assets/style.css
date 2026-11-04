@@ -144,6 +144,8 @@ img { display: block; max-width: 100%; }
   border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px;
   font-size: 13px; background: var(--card); line-height: 1.45;
   text-align: left; overflow-wrap: anywhere; word-break: break-word;
+  /* L4：千章级目录让屏外条目跳过布局/绘制，避免长列表卡顿 */
+  content-visibility: auto; contain-intrinsic-size: auto 40px;
 }
 .chapter-list a.current { background: #e7ecfd; border-color: var(--primary); color: var(--primary); }
 

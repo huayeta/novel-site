@@ -1,22 +1,37 @@
 // public/assets/app.js —— 前端逻辑（原生 JS，按 body[data-page] 分发）
 
-const DEFAULT_SRC = 'keca';
+// L8：默认源不再硬编码，启动后由 /api/sources（后端按 SOURCES 环境变量算出的启用列表）
+// 的第一个动态覆盖；迁移旧数据时仍用 'keca'（旧书架本来就是 keca）。
+const LEGACY_SRC = 'keca';
+let DEFAULT_SRC = LEGACY_SRC;
 // 当前页面所处数据源（书籍/阅读/搜索等页通过 ?src= 传入；缺省默认源）
-const curSrc = (() => {
-  try {
-    return new URLSearchParams(location.search).get('src') || DEFAULT_SRC;
-  } catch (e) {
-    return DEFAULT_SRC;
-  }
+const URL_SRC = (() => {
+  try { return new URLSearchParams(location.search).get('src') || ''; }
+  catch (e) { return ''; }
 })();
+let curSrc = URL_SRC || DEFAULT_SRC;
 
 const COVER = (p, src) =>
   p ? '/api/cover?src=' + encodeURIComponent(src || DEFAULT_SRC) + '&p=' + encodeURIComponent(p) : '';
 
-async function api(path) {
+async function apiRaw(path) {
   const r = await fetch(path);
   if (!r.ok) throw new Error('网络错误 ' + r.status);
-  return r.json();
+  return r;
+}
+async function api(path) {
+  return (await apiRaw(path)).json();
+}
+
+// 页面分发前解析真实默认源，避免以 ibq/mu8 为默认源时首页空白、来源混用
+async function resolveDefaultSource() {
+  try {
+    const list = await api('/api/sources');
+    if (Array.isArray(list) && list.length && list[0].id) {
+      DEFAULT_SRC = list[0].id;
+      if (!URL_SRC) curSrc = DEFAULT_SRC;
+    }
+  } catch (e) { /* 失败时保留 'keca' 兜底 */ }
 }
 
 function qs() {
@@ -30,19 +45,19 @@ function migrateStore() {
     const bm = JSON.parse(localStorage.getItem('qingjian_shelf') || '[]');
     localStorage.setItem(
       'qingjian_shelf',
-      JSON.stringify(bm.map((b) => (b.src ? b : { ...b, src: DEFAULT_SRC })))
+      JSON.stringify(bm.map((b) => (b.src ? b : { ...b, src: LEGACY_SRC })))
     );
     const hs = JSON.parse(localStorage.getItem('qingjian_history') || '[]');
     localStorage.setItem(
       'qingjian_history',
-      JSON.stringify(hs.map((h) => (h.src ? h : { ...h, src: DEFAULT_SRC })))
+      JSON.stringify(hs.map((h) => (h.src ? h : { ...h, src: LEGACY_SRC })))
     );
     const del = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k && k.startsWith('progress:') && !k.startsWith('progress:' + DEFAULT_SRC + ':')) {
+      if (k && k.startsWith('progress:') && !k.startsWith('progress:' + LEGACY_SRC + ':')) {
         const id = k.slice('progress:'.length);
-        localStorage.setItem('progress:' + DEFAULT_SRC + ':' + id, localStorage.getItem(k));
+        localStorage.setItem('progress:' + LEGACY_SRC + ':' + id, localStorage.getItem(k));
         del.push(k);
       }
     }
@@ -119,7 +134,10 @@ function getProgress(src, bid) {
       const o = JSON.parse(v);
       if (o && o.cid) return o;
     } catch (e) {}
-    return { cid: v }; // 兼容旧版纯字符串存储
+    // L11：旧版纯字符串可能是 "null"/"undefined" 等脏值，不能当成有效 cid
+    const s = String(v).trim();
+    if (!s || /^(null|undefined|\[object Object\])$/i.test(s)) return null;
+    return { cid: s }; // 兼容旧版纯字符串存储
   } catch (e) {
     return null;
   }
@@ -131,16 +149,19 @@ function catKeyFromUrl(url) {
   return m ? m[1] : '';
 }
 
-// 检测源站章节数据是否疑似错乱（同名/编号重复、总数与最大章节号严重不符）
-function chapterHealth(chapters) {
+// 检测源站章节数据是否疑似错乱（同名/编号重复、总数与最大章节号严重不符）。
+// L1：分页源只拿到单页，不能拿单页数量当分母（会恒不触发/误报），直接跳过；
+// 用循环求最大值，避免 Math.max(...nums) 在千章级目录上展开爆栈。
+function chapterHealth(chapters, isPartial) {
+  if (isPartial) return '';
   const nums = [];
+  let max = 0;
   for (const c of chapters) {
     const m = (c.title || '').match(/第(\d+)章/);
-    if (m) nums.push(+m[1]);
+    if (m) { const n = +m[1]; nums.push(n); if (n > max) max = n; }
   }
   if (!nums.length) return '';
   const distinct = new Set(nums).size;
-  const max = Math.max(...nums);
   if (distinct < nums.length * 0.6 || max < chapters.length * 0.5) {
     return '源站章节数据疑似错乱（编号重复/疑似混入他书章节），目录可能不准确，建议以底部「最新章节」为准。';
   }
@@ -197,7 +218,7 @@ function removeBookmark(src, id) {
   if (i >= 0) {
     list.splice(i, 1);
     saveBookmarks(list);
-    clearSeenLatest(src || DEFAULT_SRC, id); // 移出书架时清掉新章基线，重新收藏后不误报
+    clearSeenLatest(src || DEFAULT_SRC, id); // 移出书架清掉基线，重新收藏后从「首次看见」开始
   }
 }
 
@@ -288,8 +309,9 @@ async function getBookMeta(id, src) {
 }
 
 // ============ 新章「已读基线」（localStorage）============
-// 记录用户上次打开本书时看到的最新章节 cid；书架据此判断「是否出了新章」。
-// 只在书籍页/阅读页写入，书架页绝不写入，否则徽标永远不会亮。
+// 记录用户上次点进本书时看到的最新章节 cid。书架据此判断「源站是否出了新章」。
+// 关键约束：基线只在「点进书籍页/阅读页」时刷新；书架页绝不能主动刷新，
+// 否则每次打开书架都会把基线拉到当前最新章，「更新」永远不亮。
 const SEEN_KEY = 'qingjian_seen_latest';
 function readSeenMap() {
   try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}') || {}; }
@@ -313,6 +335,13 @@ function clearSeenLatest(src, id) {
     delete m[src + ':' + id];
     localStorage.setItem(SEEN_KEY, JSON.stringify(m));
   } catch (e) {}
+}
+// 冷启动兜底：老用户升级 / 刚收藏的书没有基线。首次在书架看到它时，
+// 静默用「当前最新章节」建立基线（本次不亮），此后才进入正常的「出新章→亮」循环。
+// 没有这个兜底，基线永远为空，徽标永远不会亮 —— 正是上一版的问题。
+function ensureBaseline(src, id, latestCid) {
+  if (!latestCid || getSeenLatest(src, id)) return;
+  markSeenLatest(src, id, latestCid);
 }
 
 // ============ 首页 ============
@@ -532,7 +561,7 @@ async function bookPage() {
   const pager = data.pager || null; // 分页源（如木偶小说）返回 pager；keca/ibq 为 null
   if (data.book) { data.book.src = src; data.book.srcName = srcName; }
   const b = data.book;
-  // 打开书籍页 = 已看到当前目录，写入新章基线（书架「更新」徽标据此判断）
+  // 点进书籍页 = 已阅，刷新基线使「更新」熄灭，直到源站再出新章
   if (b && b.latest && b.latest.cid) markSeenLatest(src, id, b.latest.cid);
   document.title = b.title + ' - 青简';
   const firstCid = data.chapters.length ? data.chapters[0].cid : ''; // 分页源下 data.chapters 为第 1 页，故首页首章即 chapters[0]
@@ -542,19 +571,13 @@ async function bookPage() {
     const pi = data.chapters.findIndex((c) => c.cid === prog.cid);
     if (pi >= 0) pctLabel = `（${Math.round(((pi + 1) / data.chapters.length) * 100)}%）`;
   }
+  const bidEnc = encodeURIComponent(id);
   const contBtn = prog
-    ? `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${id}&cid=${prog.cid}${pager && prog.page ? '&page=' + prog.page : ''}">继续阅读${prog.title ? '：' + esc(prog.title) : ''}${pctLabel}</a>`
-    : `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${id}&cid=${firstCid}${pager ? '&page=1' : ''}">开始阅读</a>`;
+    ? `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(prog.cid)}${pager && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}">继续阅读${prog.title ? '：' + esc(prog.title) : ''}${pctLabel}</a>`
+    : `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(firstCid)}${pager ? '&page=1' : ''}">开始阅读</a>`;
 
-  // 顶部返回链接：按浏览器历史返回（从哪个列表点进来就退回哪），无历史则回首页
-  const backLink = document.querySelector('.back-link');
-  if (backLink) {
-    backLink.textContent = '‹ 返回';
-    backLink.href = '/';
-    backLink.addEventListener('click', (e) => {
-      if (history.length > 1) { e.preventDefault(); history.back(); }
-    });
-  }
+  // 顶部返回链接固定回书架（href 已写在 book.html，不覆盖、不做 history.back，
+  // 避免从书籍页点返回时被带回搜索/分类等来源页）。
 
   document.getElementById('head').innerHTML = `
     <img class="cover" src="${COVER(b.cover, src)}" alt="">
@@ -590,12 +613,30 @@ async function bookPage() {
   const render = (list, page) => {
     const pageParam = pager ? `&page=${page}` : '';
     ch.innerHTML = list
-      .map((c) => `<a href="/read.html?src=${encodeURIComponent(src)}&bid=${id}&cid=${c.cid}${pageParam}">${esc(c.title)}</a>`)
+      .map((c) => `<a href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`)
       .join('');
+  };
+  // L4：千章级目录一次性塞 DOM 会卡顿。CSS 用 content-visibility 让屏外条目跳过渲染，
+  // 这里再对超大目录分批插入，避免单次 innerHTML 长任务阻塞主线程。
+  let _renderSeq = 0; // 代际保护：快速切排序/翻页时丢弃旧批次
+  const renderChunked = (list, page) => {
+    const seq = ++_renderSeq;
+    if (list.length <= 400) { render(list, page); return; }
+    const pageParam = pager ? `&page=${page}` : '';
+    const html = (c) => `<a href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`;
+    ch.innerHTML = list.slice(0, 400).map(html).join('');
+    let i = 400;
+    const step = () => {
+      if (seq !== _renderSeq || i >= list.length) return; // 已被新渲染取代
+      ch.insertAdjacentHTML('beforeend', list.slice(i, i + 400).map(html).join(''));
+      i += 400;
+      setTimeout(step, 0);
+    };
+    setTimeout(step, 0);
   };
   const applyOrder = () => {
     const list = desc ? data.chapters.slice().reverse() : data.chapters;
-    render(list, curPage);
+    renderChunked(list, curPage);
     if (orderSeg) {
       orderSeg.querySelectorAll('button').forEach((btn) => {
         btn.classList.toggle('on', (btn.dataset.order === 'desc') === desc);
@@ -603,13 +644,34 @@ async function bookPage() {
     }
   };
 
+  // M5：pager 是进入页面时的快照。用户操作分页器/重试时重新取一次 /api/book，
+  // 让源站在页面打开期间新增的目录页也能被翻到（不用整页刷新）。
+  let lastGoodPage = 1;
+  async function refreshPager() {
+    if (!pager) return;
+    try {
+      const d = await api('/api/book/' + encodeURIComponent(src) + '/' + encodeURIComponent(id));
+      if (d && d.pager && d.pager.totalPages > pager.totalPages) {
+        pager.totalPages = d.pager.totalPages;
+        if (d.totalChapters) data.totalChapters = d.totalChapters;
+      }
+    } catch (e) { /* 刷新失败沿用已有快照 */ }
+  }
+
   // 分页源：按需抓取某一页，避免一次性抓取全部触发源站连接重置
-  async function loadChapterPage(p) {
+  // 只在「翻到当前末页/重试」时刷新 pager 快照（M5），普通翻页不额外请求
+  async function loadChapterPage(p, opts = {}) {
+    const atBoundary = p >= pager.totalPages;
+    if ((atBoundary || opts.force) && !opts.skipRefresh) await refreshPager();
     p = Math.max(1, Math.min(pager.totalPages, p | 0));
+    const prevPage = curPage;
     try {
       const pg = await api('/api/chapters/' + encodeURIComponent(src) + '/' + encodeURIComponent(id) + '?page=' + p);
+      if (!pg.items || !pg.items.length) throw new Error('空目录页');
+      if (pg.totalPages > pager.totalPages) pager.totalPages = pg.totalPages;
       data.chapters = pg.items || [];
       curPage = pg.page || p;
+      lastGoodPage = curPage;
       if (chDir) chDir.innerHTML = `章节目录 <span class="more">第 <span id="curPageNum">${curPage}</span> / ${pager.totalPages} 页</span>`;
       applyOrder();
       if (pagerEl) {
@@ -621,9 +683,12 @@ async function bookPage() {
           <button type="button" data-pg="${pager.totalPages}" ${curPage >= pager.totalPages ? 'disabled' : ''}>末页</button>`;
       }
     } catch (e) {
-      if (pagerEl) pagerEl.innerHTML = `<span class="warn">第 ${p} 页加载失败，<a href="#" id="pgRetry">点击重试</a></span>`;
+      // L10：失败时把页码/标题/分页器回滚到上一个有效页，不再出现「目录是上一页但页码显示失败页」
+      curPage = lastGoodPage || prevPage;
+      if (chDir) chDir.innerHTML = `章节目录 <span class="more">第 <span id="curPageNum">${curPage}</span> / ${pager.totalPages} 页</span>`;
+      if (pagerEl) pagerEl.innerHTML = `<span class="warn">第 ${p} 页加载失败（仍在第 ${curPage} 页），<a href="#" id="pgRetry">点击重试</a></span>`;
       const rt = document.getElementById('pgRetry');
-      if (rt) rt.addEventListener('click', (ev) => { ev.preventDefault(); loadChapterPage(p); });
+      if (rt) rt.addEventListener('click', (ev) => { ev.preventDefault(); loadChapterPage(p, { force: true }); });
     }
   }
 
@@ -636,7 +701,7 @@ async function bookPage() {
         loadChapterPage(Number(btn.dataset.pg));
       });
     }
-    await loadChapterPage(pager.totalPages); // 默认展示最新页
+    await loadChapterPage(pager.totalPages, { skipRefresh: true }); // 默认展示最新页，快照刚拿到无需再刷
   } else {
     if (chDir) chDir.innerHTML = `章节目录 <span class="more">共 <span id="chapterCount">${data.chapters.length}</span> 章</span>`;
     applyOrder();
@@ -652,7 +717,7 @@ async function bookPage() {
   }
 
   const warnBox = document.getElementById('chapterWarn');
-  if (warnBox) warnBox.textContent = chapterHealth(data.chapters);
+  if (warnBox) warnBox.textContent = chapterHealth(data.chapters, !!pager);
 }
 
 // ============ 缓存层（localStorage，TTL 自动过期 + LRU 上限）============
@@ -681,12 +746,15 @@ function makeLCache(name, { ttl = 30 * 60 * 1000, max = 300 } = {}) {
       const o = load();
       const e = o[k];
       if (!e) return undefined;
-      if (Date.now() - e.ts > ttl) { delete o[k]; persist(); return undefined; }
+      // 每条可带自己的 ttl（M4：夹到服务端缓存剩余寿命），否则用实例默认 ttl
+      if (Date.now() - e.ts > (e.ttl || ttl)) { delete o[k]; persist(); return undefined; }
       return e.v;
     },
-    set(k, v) {
+    set(k, v, ttlMs) {
       const o = load();
-      o[k] = { ts: Date.now(), v };
+      const e = { ts: Date.now(), v };
+      if (ttlMs && ttlMs > 0) e.ttl = ttlMs;
+      o[k] = e;
       evict(o);
       if (!persist()) {
         // 配额溢出：再淘汰一半最旧的，避免 QuotaExceededError 影响阅读
@@ -717,8 +785,15 @@ function hasListData(v) {
 async function cachedApi(path, cache) {
   const hit = cache.get(path);
   if (hit !== undefined) return hit;
-  const v = await api(path);
-  if (hasListData(v)) cache.set(path, v);
+  // M4：读服务端缓存的剩余寿命，把本地 TTL 夹到不超过它，
+  // 避免「前端 10min + 服务端剩余 10min」叠加成 20min 的陈旧窗口。
+  const r = await apiRaw(path);
+  const v = await r.json();
+  const leftSec = Number(r.headers.get('X-Cache-Remaining')) || 0;
+  if (hasListData(v)) {
+    const ttlMs = leftSec > 0 ? leftSec * 1000 : undefined;
+    cache.set(path, v, ttlMs);
+  }
   return v;
 }
 // 书籍详情 + 章节目录：绝对不缓存。
@@ -756,13 +831,13 @@ async function readPage() {
   const data = await getBookData(pageSrc || DEFAULT_SRC, bid);
   const src = data.src || pageSrc || DEFAULT_SRC;
   if (data.book) data.book.src = src;
-  // 进入阅读页同样视为已看到当前目录，更新新章基线
+  // 直接进入阅读页同样算已阅，刷新基线（避免从历史/深链进入时不灭）
   if (data.book && data.book.latest && data.book.latest.cid) markSeenLatest(src, bid, data.book.latest.cid);
 
   // 顶部返回：回到本书详情页
   const readBack = document.getElementById('readBack');
   if (readBack) {
-    readBack.href = `/book.html?src=${encodeURIComponent(src)}&id=${bid}`;
+    readBack.href = `/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(bid)}`;
     readBack.textContent = '‹ 目录';
   }
 
@@ -777,20 +852,42 @@ async function readPage() {
   const tocFilter = document.getElementById('tocFilter');
   const tocPager = document.getElementById('tocPager');
   const pager = data.pager || null;
-  const total = pager ? (pager.totalPages * pager.pageSize) : data.chapters.length;
+  // H4：用服务端给出的真实总章数，别用 totalPages*pageSize 高估（末页通常不满）
+  let total = Number(data.totalChapters) || (pager ? pager.totalPages * pager.pageSize : data.chapters.length);
 
   // 分页源（如木偶小说）：章节目录按需逐页加载并累加到 data.chapters，
   // 不一次性抓取全部，避免触发源站连续请求被重置。每页章节带 _page 标记。
   const loadedPages = new Map();
+  // L2：/api/book 已带回第 1 页目录，直接复用，避免进入阅读页再重复抓一次
+  if (pager && data.chapters && data.chapters.length) {
+    loadedPages.set(1, data.chapters.map((it) => ({ ...it, _page: 1 })));
+  }
   function rebuildChapters() {
     const ks = [...loadedPages.keys()].sort((a, b) => a - b);
     data.chapters = [].concat(...ks.map((k) => loadedPages.get(k)));
   }
+  // M5：pager 快照在页面长开期间可能过期。打开目录浮层 / 翻到边界时刷新一次，
+  // 让源站新增的目录页可达（total 同步更新，进度百分比才不会偏低）。
+  async function refreshPager() {
+    if (!pager) return;
+    try {
+      const d = await api('/api/book/' + encodeURIComponent(src) + '/' + encodeURIComponent(bid));
+      if (d && d.pager && d.pager.totalPages > pager.totalPages) {
+        pager.totalPages = d.pager.totalPages;
+        if (d.totalChapters) total = Number(d.totalChapters) || total;
+      }
+    } catch (e) { /* 刷新失败沿用已有快照 */ }
+  }
+
   async function ensurePage(p) {
     if (!pager) return data.chapters;
     p = Math.max(1, Math.min(pager.totalPages, p | 0));
     if (loadedPages.has(p)) return loadedPages.get(p);
     const pg = await api('/api/chapters/' + encodeURIComponent(src) + '/' + encodeURIComponent(bid) + '?page=' + p);
+    if (pg.totalPages > pager.totalPages) {
+      pager.totalPages = pg.totalPages;
+      if (pg.totalChapters) total = Number(pg.totalChapters) || total;
+    }
     loadedPages.set(p, (pg.items || []).map((it) => ({ ...it, _page: p })));
     rebuildChapters();
     return loadedPages.get(p);
@@ -928,6 +1025,8 @@ async function readPage() {
     renderTocPager();
     if (tocOverlay) tocOverlay.hidden = false;
     if (tocFilter) tocFilter.focus();
+    // M5：打开目录时后台刷新 pager 快照，源站新增的目录页随后即可翻到
+    if (pager) refreshPager().then(() => { if (tocOverlay && !tocOverlay.hidden) renderTocPager(); }).catch(() => {});
   };
   const closeToc = () => { if (tocOverlay) tocOverlay.hidden = true; };
 
@@ -943,25 +1042,30 @@ async function readPage() {
     closeToc();
     goToChapter(a.dataset.cid);
   });
-  // 跨页翻章：上一章/下一章落在相邻页时，先按需加载该页再跳转
-  const goPrev = () => {
-    if (!prev) return;
-    if (prev.__page) {
-      ensurePage(prev.__page).then(() => {
-        const arr = loadedPages.get(prev.__page);
-        if (arr && arr.length) goToChapter(prev.__edge === 'last' ? arr[arr.length - 1].cid : arr[0].cid);
-      });
-    } else goToChapter(prev.cid);
-  };
-  const goNext = () => {
-    if (!next) return;
-    if (next.__page) {
-      ensurePage(next.__page).then(() => {
-        const arr = loadedPages.get(next.__page);
-        if (arr && arr.length) goToChapter(next.__edge === 'first' ? arr[0].cid : arr[arr.length - 1].cid);
-      });
-    } else goToChapter(next.cid);
-  };
+  // 跨页翻章：上一章/下一章落在相邻页时，先按需加载该页再跳转。
+  // H2：闭包里必须快照 target（prev/next 会被 syncChrome 重新赋值），并加防抖，
+  // 否则跨页边界快速连点会跳错页 / 导航被静默丢弃。
+  let crossNavigating = false;
+  async function crossPage(target) {
+    if (!target || crossNavigating) return;
+    if (!target.__page) return goToChapter(target.cid);
+    const page = target.__page;
+    const edge = target.__edge;
+    crossNavigating = true;
+    try {
+      if (pager && page >= pager.totalPages) await refreshPager(); // M5：边界翻页时先刷新快照
+      const arr = await ensurePage(page);
+      if (arr && arr.length) {
+        await goToChapter(edge === 'last' ? arr[arr.length - 1].cid : arr[0].cid);
+      }
+    } catch (e) {
+      console.error('跨页翻章失败', e);
+    } finally {
+      crossNavigating = false;
+    }
+  }
+  const goPrev = () => crossPage(prev);
+  const goNext = () => crossPage(next);
   if (nav) nav.addEventListener('click', (e) => {
     if (e.target.closest('.nav-prev')) { e.preventDefault(); goPrev(); }
     else if (e.target.closest('.nav-next')) { e.preventDefault(); goNext(); }
@@ -1029,13 +1133,16 @@ function firstChapterCidOf(meta) {
 function continueTarget(b, meta, prog) {
   const src = b.src || curSrc;
   const cid = (prog && prog.cid) || firstChapterCidOf(meta);
+  // L7：id / cid / page 统一编码，避免属性与 URL 注入
+  const bid = encodeURIComponent(b.id);
   return cid
-    ? `/read.html?src=${encodeURIComponent(src)}&bid=${b.id}&cid=${cid}${prog && prog.page ? '&page=' + prog.page : ''}`
-    : `/book.html?src=${encodeURIComponent(src)}&id=${b.id}`;
+    ? `/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${encodeURIComponent(cid)}${prog && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}`
+    : `/book.html?src=${encodeURIComponent(src)}&id=${bid}`;
 }
 
 // 书架一行（富信息：封面 / 标题 / 更新徽标 / 章节进度 / 最新章节）
-function shelfRow(b, meta, prog) {
+// skeleton=true 表示骨架态（meta 尚未返回），此时不渲染 ⋮ 菜单，避免「继续」落到错误链接
+function shelfRow(b, meta, prog, skeleton) {
   const src = b.src || curSrc;
   const err = !!(meta && meta.error);
   const total = err || !meta ? 0 : meta.total;
@@ -1050,10 +1157,10 @@ function shelfRow(b, meta, prog) {
     (!!(prog && prog.cid && latestCid && prog.cid === latestCid)) ||
     (total > 0 && readNo >= total);
 
-  // 「更新」= 源站最新章节比上次打开本书时更新 —— 真正的新章检测，
-  // 不再是「未读完」指示器，也不依赖 readNo/total（分页源下 cids 只有第 1 页）。
+  // 「更新」= 源站最新章节 ≠ 上次点进本书时看到的最新章节（真正的新章检测）。
+  // 点进书籍页/阅读页会刷新基线使徽标熄灭，直到源站再出新章才重新亮起。
   const seen = getSeenLatest(src, b.id);
-  const showUpdate = !err && !!latestCid && !!seen && seen !== latestCid && !atLatest;
+  const showUpdate = !!(!err && latestCid && seen && seen !== latestCid && !atLatest);
 
   let progressLine;
   if (err) progressLine = '暂时无法获取，点开重试';
@@ -1068,17 +1175,17 @@ function shelfRow(b, meta, prog) {
   const contHref = continueTarget(b, meta, prog);
 
   return `<div class="shelf-item" data-id="${esc(b.id)}" data-src="${esc(src)}">
-    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${esc(b.id)}">${coverEl(b)}</a>
+    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${coverEl(b)}</a>
     <div class="shelf-main">
       <div class="shelf-top">
-        <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${esc(b.id)}">${esc(b.title)}</a>
+        <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${esc(b.title)}</a>
         ${showUpdate ? '<span class="upd-badge">更新</span>' : ''}
       </div>
       <div class="shelf-progress${atLatest ? ' latest' : ''}">${esc(progressLine)}</div>
       ${updateLine ? `<div class="shelf-update">${updateLine}</div>` : ''}
       ${latestLine ? `<div class="shelf-latest">${latestLine}</div>` : ''}
     </div>
-    <button class="shelf-more" data-id="${esc(b.id)}" data-src="${esc(src)}" data-href="${contHref}" type="button" aria-label="更多" title="更多">⋮</button>
+    ${skeleton ? '' : `<button class="shelf-more" data-id="${esc(b.id)}" data-src="${esc(src)}" data-href="${esc(contHref)}" type="button" aria-label="更多" title="更多">⋮</button>`}
   </div>`;
 }
 
@@ -1086,14 +1193,15 @@ function shelfRow(b, meta, prog) {
 function historyRow(h) {
   const src = h.src || curSrc;
   const t = timeAgo(h.ts);
+  const hid = encodeURIComponent(h.id);
   return `<div class="shelf-item" data-id="${esc(h.id)}" data-src="${esc(src)}">
-    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${esc(h.id)}">${coverEl(h)}</a>
+    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${hid}">${coverEl(h)}</a>
     <div class="shelf-main">
-      <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${esc(h.id)}">${esc(h.title)}</a>
+      <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(h.title)}</a>
       <div class="shelf-progress">读到：${esc(h.ctitle || '未知章节')}</div>
       <div class="shelf-update">${t ? t + ' · ' : ''}${esc(h.author || '')}</div>
     </div>
-    <a class="shelf-cont-link" href="/read.html?src=${encodeURIComponent(src)}&bid=${esc(h.id)}&cid=${esc(h.cid)}${h.page ? '&page=' + esc(h.page) : ''}">继续</a>
+    <a class="shelf-cont-link" href="/read.html?src=${encodeURIComponent(src)}&bid=${hid}&cid=${encodeURIComponent(h.cid || '')}${h.page ? '&page=' + encodeURIComponent(h.page) : ''}">继续</a>
   </div>`;
 }
 
@@ -1109,14 +1217,28 @@ function openRowMenu(anchor, { id, src, href }) {
   menu.dataset.rid = String(id);
   menu.dataset.rsrc = String(src);
   menu.innerHTML = `
-    <a href="${href}">继续阅读</a>
-    <a href="/book.html?src=${encodeURIComponent(src)}&id=${id}">查看详情</a>
+    <a href="${esc(href)}">继续阅读</a>
+    <a href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}">查看详情</a>
     <button type="button" data-act="remove">移出书架</button>`;
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
   menu.style.top = r.bottom + window.scrollY + 6 + 'px';
   menu.style.left = Math.max(8, r.right + window.scrollX - 140) + 'px';
   _rowMenu = menu;
+}
+
+// L6：限制并发，避免大书架一次性发出 N 个 /api/book（分页源每本 2 次回源）触发限频
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 let _shelfRenderSeq = 0;
@@ -1132,9 +1254,16 @@ async function renderShelf() {
     return;
   }
   const isFresh = () => seq === _shelfRenderSeq;
-  box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id))).join(''); // 先骨架（无 meta）
-  const metas = await Promise.all(list.map((b) => getBookMeta(b.id, b.src || curSrc)));
+  // L5：骨架态还没有 meta，先不渲染 ⋮ 菜单，避免「继续」落到错误链接
+  box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id), true)).join('');
+  const metas = await mapLimit(list, 4, (b) => getBookMeta(b.id, b.src || curSrc));
   if (!isFresh()) return;
+  // 冷启动：为没有基线的书建立起点（本次不亮），之后只在点进书时刷新基线。
+  // 必须在渲染前执行，且只在基线为空时写入，绝不覆盖已有基线。
+  list.forEach((b, i) => {
+    const m = metas[i];
+    if (m && !m.error && m.latestCid) ensureBaseline(b.src || curSrc, b.id, m.latestCid);
+  });
   box.innerHTML = list.map((b, i) => shelfRow(b, metas[i], getProgress(b.src || curSrc, b.id))).join('');
 }
 
@@ -1176,7 +1305,7 @@ async function shelfPage() {
       openRowMenu(more, {
         id,
         src,
-        href: more.dataset.href || `/book.html?src=${encodeURIComponent(src)}&id=${id}`,
+        href: more.dataset.href || `/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}`,
       });
       return;
     }
@@ -1204,8 +1333,9 @@ async function shelfPage() {
   }
 }
 
-// 分发
-document.addEventListener('DOMContentLoaded', () => {
+// 分发：解析真实默认源后再启动各页面，保证 ?src= 缺省时用后端同一默认源
+document.addEventListener('DOMContentLoaded', async () => {
+  await resolveDefaultSource();
   const page = document.body.dataset.page;
   const map = {
     home: homePage,

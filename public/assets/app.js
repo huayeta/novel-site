@@ -1,5 +1,19 @@
 // public/assets/app.js —— 前端逻辑（原生 JS，按 body[data-page] 分发）
 
+// ---- BASE_PATH 支持 ----
+// 站点可挂在任意子路径下（例如 nginx 把 /xiaoshuo/ 反代到本服务）。
+// 前缀由当前页面路径自动推导：'/xiaoshuo/read.html' -> '/xiaoshuo'，根路径时为 ''。
+// 需要显式指定时（例如后端 BASE_PATH 与访问路径不一致），可在页面里注入 window.__BASE_PATH__。
+const BASE = (() => {
+  if (typeof window !== 'undefined' && typeof window.__BASE_PATH__ === 'string') {
+    return window.__BASE_PATH__.replace(/\/+$/, '');
+  }
+  const p = (typeof location !== 'undefined' && location.pathname) || '/';
+  return p.replace(/\/[^/]*$/, '');
+})();
+// 给根路径绝对地址补上站点前缀
+const U = (u) => (typeof u === 'string' && u.charAt(0) === '/' ? BASE + u : u);
+
 // L8：默认源不再硬编码，启动后由 /api/sources（后端按 SOURCES 环境变量算出的启用列表）
 // 的第一个动态覆盖；迁移旧数据时仍用 'keca'（旧书架本来就是 keca）。
 const LEGACY_SRC = 'keca';
@@ -12,7 +26,7 @@ const URL_SRC = (() => {
 let curSrc = URL_SRC || DEFAULT_SRC;
 
 const COVER = (p, src) =>
-  p ? '/api/cover?src=' + encodeURIComponent(src || DEFAULT_SRC) + '&p=' + encodeURIComponent(p) : '';
+  p ? U('/api/cover?src=') + encodeURIComponent(src || DEFAULT_SRC) + '&p=' + encodeURIComponent(p) : '';
 
 async function apiRaw(path) {
   const r = await fetch(path);
@@ -26,7 +40,7 @@ async function api(path) {
 // 页面分发前解析真实默认源，避免以 ibq/mu8 为默认源时首页空白、来源混用
 async function resolveDefaultSource() {
   try {
-    const list = await api('/api/sources');
+    const list = await api(U('/api/sources'));
     if (Array.isArray(list) && list.length && list[0].id) {
       DEFAULT_SRC = list[0].id;
       if (!URL_SRC) curSrc = DEFAULT_SRC;
@@ -80,7 +94,7 @@ function coverEl(b) {
 
 function bookCard(b, opts = {}) {
   const src = b.src || curSrc;
-  const url = `/book.html?src=${encodeURIComponent(src)}&id=${b.id}`;
+  const url = `${BASE}/book.html?src=${encodeURIComponent(src)}&id=${b.id}`;
   if (opts.row) {
     const badge = b.srcName ? `<span class="src-badge">${esc(b.srcName)}</span>` : '';
     const metaBits = [b.status, b.wordCount, b.update].filter(Boolean).map(esc);
@@ -346,7 +360,7 @@ function ensureBaseline(src, id, latestCid) {
 
 // ============ 首页 ============
 async function homePage() {
-  const data = await cachedApi('/api/home', listCache);
+  const data = await cachedApi(U('/api/home'), listCache);
   const featured = document.getElementById('featured');
   featured.innerHTML =
     data.featured.map((b) => bookCard(b)).join('') || '<div class="empty">暂无强推</div>';
@@ -355,7 +369,7 @@ async function homePage() {
   cats.innerHTML = data.categories
     .map(
       (c) =>
-        `<a class="chip" href="/category.html?cat=${c.key}&name=${encodeURIComponent(c.name)}">${esc(c.name)}</a>`
+        `<a class="chip" href="${BASE}/category.html?cat=${c.key}&name=${encodeURIComponent(c.name)}">${esc(c.name)}</a>`
     )
     .join('');
 
@@ -364,17 +378,17 @@ async function homePage() {
     .map((c) => {
       const books = (c.books || []).slice(0, 6).map((b) => bookCard(b)).join('');
       return `<div class="section-title">${esc(c.name)}
-        <a class="more" href="/category.html?cat=${c.key}&name=${encodeURIComponent(c.name)}">更多 ›</a></div>
+        <a class="more" href="${BASE}/category.html?cat=${c.key}&name=${encodeURIComponent(c.name)}">更多 ›</a></div>
         <div class="book-grid">${books || '<div class="empty">暂无</div>'}</div>`;
     })
     .join('');
 
   // 排行链接
-  const ranks = await api('/api/ranks');
+  const ranks = await api(U('/api/ranks'));
   document.getElementById('rankList').innerHTML = ranks
     .map(
       (r) =>
-        `<a class="chip" href="/rank.html?type=${r.key}&name=${encodeURIComponent(r.name)}">${esc(r.name)}</a>`
+        `<a class="chip" href="${BASE}/rank.html?type=${r.key}&name=${encodeURIComponent(r.name)}">${esc(r.name)}</a>`
     )
     .join('');
 
@@ -392,7 +406,7 @@ async function homePage() {
   if (nb) {
     try {
       // 需带 src（后端路由为 /api/rank/:src/:type），否则 404 导致本栏一直为空
-      const nd = await cachedApi('/api/rank/' + curSrc + '/postdate', listCache);
+      const nd = await cachedApi(U('/api/rank/') + curSrc + '/postdate', listCache);
       nb.innerHTML = nd.books.length
         ? nd.books.slice(0, 9).map((b) => bookCard(b)).join('')
         : '<div class="empty">暂无</div>';
@@ -411,7 +425,7 @@ function initSearch() {
   const go = async () => {
     const q = input.value.trim();
     if (!q) return;
-    location.href = '/search.html?q=' + encodeURIComponent(q);
+    location.href = U('/search.html?q=') + encodeURIComponent(q);
   };
   btn.addEventListener('click', go);
   input.addEventListener('keydown', (e) => e.key === 'Enter' && go());
@@ -442,7 +456,7 @@ async function searchPage() {
 
   // 来源筛选 chips（全部 + 每个已启用源）
   try {
-    const sources = await api('/api/sources');
+    const sources = await api(U('/api/sources'));
     if (chipsEl) {
       const chips = ['<button class="chip active" data-src="all" type="button">全部</button>'].concat(
         sources.map(
@@ -477,7 +491,7 @@ async function searchPage() {
   async function doSearch() {
     box.innerHTML = '<div class="loading">搜索中…</div>';
     try {
-      const res = await cachedApi('/api/search?q=' + encodeURIComponent(query), searchCache);
+      const res = await cachedApi(U('/api/search?q=') + encodeURIComponent(query), searchCache);
       allResults = (res.results || []).slice();
       renderResults();
     } catch (e) {
@@ -496,7 +510,7 @@ async function searchPage() {
       ['yanqingxiaoshuo', '言情'],
     ];
     hot.innerHTML = '<div class="section-title">分类直达</div><div class="chips">' +
-      cats.map(([k, n]) => `<a class="chip" href="/category.html?cat=${k}&name=${encodeURIComponent(n)}">${n}</a>`).join('') + '</div>';
+      cats.map(([k, n]) => `<a class="chip" href="${BASE}/category.html?cat=${k}&name=${encodeURIComponent(n)}">${n}</a>`).join('') + '</div>';
   }
 }
 
@@ -505,7 +519,7 @@ async function categoryPage() {
   const { cat, name } = qs();
   document.getElementById('catName').textContent = name || cat;
   document.title = (name || cat) + ' - 青简';
-  const data = await cachedApi('/api/category/' + curSrc + '/' + cat, listCache);
+  const data = await cachedApi(U('/api/category/') + curSrc + '/' + cat, listCache);
   const box = document.getElementById('books');
   box.innerHTML = data.books.length
     ? data.books.map((b) => bookCard(b, { row: true })).join('')
@@ -517,7 +531,7 @@ async function rankPage() {
   const { type, name } = qs();
   document.getElementById('rankName').textContent = name || type;
   document.title = (name || type) + ' - 青简';
-  const data = await cachedApi('/api/rank/' + curSrc + '/' + type, listCache);
+  const data = await cachedApi(U('/api/rank/') + curSrc + '/' + type, listCache);
   const box = document.getElementById('books');
   box.innerHTML = data.books.length
     ? data.books.map((b) => bookCard(b, { row: true })).join('')
@@ -538,11 +552,11 @@ async function quanbenPage() {
   if (sc) {
     sc.innerHTML = QUANBEN_SORTS.map(
       ([k, n]) =>
-        `<a class="chip${k === sort ? ' on' : ''}" href="/quanben.html?sort=${k}&name=${encodeURIComponent(n)}">${n}</a>`
+        `<a class="chip${k === sort ? ' on' : ''}" href="${BASE}/quanben.html?sort=${k}&name=${encodeURIComponent(n)}">${n}</a>`
     ).join('');
   }
 
-  const data = await cachedApi('/api/quanben?src=' + curSrc + '&sort=' + encodeURIComponent(sort), listCache);
+  const data = await cachedApi(U('/api/quanben?src=') + curSrc + '&sort=' + encodeURIComponent(sort), listCache);
   const title = name || data.name || '完本小说';
   document.getElementById('qbName').textContent = title;
   document.title = title + ' - 青简';
@@ -573,8 +587,8 @@ async function bookPage() {
   }
   const bidEnc = encodeURIComponent(id);
   const contBtn = prog
-    ? `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(prog.cid)}${pager && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}">继续阅读${prog.title ? '：' + esc(prog.title) : ''}${pctLabel}</a>`
-    : `<a class="btn" href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(firstCid)}${pager ? '&page=1' : ''}">开始阅读</a>`;
+    ? `<a class="btn" href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(prog.cid)}${pager && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}">继续阅读${prog.title ? '：' + esc(prog.title) : ''}${pctLabel}</a>`
+    : `<a class="btn" href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(firstCid)}${pager ? '&page=1' : ''}">开始阅读</a>`;
 
   // 顶部返回链接固定回书架（href 已写在 book.html，不覆盖、不做 history.back，
   // 避免从书籍页点返回时被带回搜索/分类等来源页）。
@@ -584,7 +598,7 @@ async function bookPage() {
     <div class="meta">
       <h1>${esc(b.title)}</h1>
       <div class="line">作者：${esc(b.author)}</div>
-      ${b.category ? `<div class="line">分类：<a href="/category.html?cat=${catKeyFromUrl(b.category.url)}&name=${encodeURIComponent(b.category.name)}">${esc(b.category.name)}</a></div>` : ''}
+      ${b.category ? `<div class="line">分类：<a href="${BASE}/category.html?cat=${catKeyFromUrl(b.category.url)}&name=${encodeURIComponent(b.category.name)}">${esc(b.category.name)}</a></div>` : ''}
       <div class="line">状态：${statusBadge(b.status)}</div>
       <div class="line">来源：<span class="src-badge">${esc(srcName)}</span></div>
       <div class="line">更新：${esc(b.update || '未知')}</div>
@@ -613,7 +627,7 @@ async function bookPage() {
   const render = (list, page) => {
     const pageParam = pager ? `&page=${page}` : '';
     ch.innerHTML = list
-      .map((c) => `<a href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`)
+      .map((c) => `<a href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`)
       .join('');
   };
   // L4：千章级目录一次性塞 DOM 会卡顿。CSS 用 content-visibility 让屏外条目跳过渲染，
@@ -623,7 +637,7 @@ async function bookPage() {
     const seq = ++_renderSeq;
     if (list.length <= 400) { render(list, page); return; }
     const pageParam = pager ? `&page=${page}` : '';
-    const html = (c) => `<a href="/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`;
+    const html = (c) => `<a href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`;
     ch.innerHTML = list.slice(0, 400).map(html).join('');
     let i = 400;
     const step = () => {
@@ -650,7 +664,7 @@ async function bookPage() {
   async function refreshPager() {
     if (!pager) return;
     try {
-      const d = await api('/api/book/' + encodeURIComponent(src) + '/' + encodeURIComponent(id));
+      const d = await api(U('/api/book/') + encodeURIComponent(src) + '/' + encodeURIComponent(id));
       if (d && d.pager && d.pager.totalPages > pager.totalPages) {
         pager.totalPages = d.pager.totalPages;
         if (d.totalChapters) data.totalChapters = d.totalChapters;
@@ -666,7 +680,7 @@ async function bookPage() {
     p = Math.max(1, Math.min(pager.totalPages, p | 0));
     const prevPage = curPage;
     try {
-      const pg = await api('/api/chapters/' + encodeURIComponent(src) + '/' + encodeURIComponent(id) + '?page=' + p);
+      const pg = await api(U('/api/chapters/') + encodeURIComponent(src) + '/' + encodeURIComponent(id) + '?page=' + p);
       if (!pg.items || !pg.items.length) throw new Error('空目录页');
       if (pg.totalPages > pager.totalPages) pager.totalPages = pg.totalPages;
       data.chapters = pg.items || [];
@@ -800,7 +814,7 @@ async function cachedApi(path, cache) {
 // 书架页「更新」徽标（章节总数 / 最新章节）与 book 页章节目录都依赖它的实时响应，
 // 后端对应接口也标记了 no-store；这里保持每次都真实请求。
 function getBookData(src, id) {
-  return api('/api/book/' + encodeURIComponent(src) + '/' + encodeURIComponent(id));
+  return api(U('/api/book/') + encodeURIComponent(src) + '/' + encodeURIComponent(id));
 }
 
 // ============ 章节内容缓存 + 预加载 ============
@@ -812,7 +826,7 @@ async function fetchChapter(src, bid, cid) {
   const k = src + '/' + bid + '/' + cid;
   const hit = ccGet(k);
   if (hit !== undefined) return hit;
-  const v = await api('/api/chapter/' + src + '/' + bid + '/' + cid);
+  const v = await api(U('/api/chapter/') + src + '/' + bid + '/' + cid);
   ccSet(k, v);
   return v;
 }
@@ -822,7 +836,7 @@ function prefetchChapter(src, bid, cid) {
   if (!cid) return;
   const k = src + '/' + bid + '/' + cid;
   if (ccGet(k) !== undefined) return;
-  api('/api/chapter/' + src + '/' + bid + '/' + cid).then((v) => ccSet(k, v)).catch(() => {});
+  api(U('/api/chapter/') + src + '/' + bid + '/' + cid).then((v) => ccSet(k, v)).catch(() => {});
 }
 
 // ============ 阅读页（SPA：翻章不刷新整页） ============
@@ -837,7 +851,7 @@ async function readPage() {
   // 顶部返回：回到本书详情页
   const readBack = document.getElementById('readBack');
   if (readBack) {
-    readBack.href = `/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(bid)}`;
+    readBack.href = `${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(bid)}`;
     readBack.textContent = '‹ 目录';
   }
 
@@ -871,7 +885,7 @@ async function readPage() {
   async function refreshPager() {
     if (!pager) return;
     try {
-      const d = await api('/api/book/' + encodeURIComponent(src) + '/' + encodeURIComponent(bid));
+      const d = await api(U('/api/book/') + encodeURIComponent(src) + '/' + encodeURIComponent(bid));
       if (d && d.pager && d.pager.totalPages > pager.totalPages) {
         pager.totalPages = d.pager.totalPages;
         if (d.totalChapters) total = Number(d.totalChapters) || total;
@@ -883,7 +897,7 @@ async function readPage() {
     if (!pager) return data.chapters;
     p = Math.max(1, Math.min(pager.totalPages, p | 0));
     if (loadedPages.has(p)) return loadedPages.get(p);
-    const pg = await api('/api/chapters/' + encodeURIComponent(src) + '/' + encodeURIComponent(bid) + '?page=' + p);
+    const pg = await api(U('/api/chapters/') + encodeURIComponent(src) + '/' + encodeURIComponent(bid) + '?page=' + p);
     if (pg.totalPages > pager.totalPages) {
       pager.totalPages = pg.totalPages;
       if (pg.totalChapters) total = Number(pg.totalChapters) || total;
@@ -938,8 +952,8 @@ async function readPage() {
     document.title = title + ' - 青简';
     if (titleEl) titleEl.textContent = title || '章节';
     // 导航按钮：保留 href 以便新标签页打开；点击走 SPA 翻章
-    const prevHref = prev ? (prev.cid ? `/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${prev.cid}` : '#') : '#';
-    const nextHref = next ? (next.cid ? `/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${next.cid}` : '#') : '#';
+    const prevHref = prev ? (prev.cid ? `${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${prev.cid}` : '#') : '#';
+    const nextHref = next ? (next.cid ? `${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${next.cid}` : '#') : '#';
     nav.innerHTML = `
       <a href="${prevHref}" class="nav-prev ${prev ? '' : 'disabled'}"${prev && prev.__page ? ` data-edge="prev" data-page="${prev.__page}"` : ''}>上一章</a>
       <a href="#" class="toc-trigger">目录</a>
@@ -948,7 +962,7 @@ async function readPage() {
     if (tocList) tocList.querySelectorAll('.toc-item').forEach((a) => a.classList.toggle('on', a.dataset.cid === cid));
     curPage = myPage; // 同步当前所在页（用于地址栏 / 浮层分页器）
     // 更新地址栏（不刷新），方便刷新/分享/前进后退
-    if (push) history.pushState({ cid }, '', `/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${cid}` + (pager ? `&page=${curPage}` : ''));
+    if (push) history.pushState({ cid }, '', `${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${cid}` + (pager ? `&page=${curPage}` : ''));
   }
 
   // 翻章（SPA）：取正文（前端缓存优先）→ 渲染 → 预取下一章
@@ -1001,7 +1015,7 @@ async function readPage() {
     let items = q ? pageItems.filter((c) => c.title.includes(q)) : pageItems;
     items = items.slice().reverse(); // 目录固定倒序：最新章节在前
     tocList.innerHTML = items.length
-      ? items.map((c) => `<a class="toc-item${c.cid === cid ? ' on' : ''}" data-cid="${esc(c.cid)}" data-page="${c._page || 1}" href="/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${esc(c.cid)}${pager ? '&page=' + (c._page || 1) : ''}">${esc(c.title)}</a>`).join('')
+      ? items.map((c) => `<a class="toc-item${c.cid === cid ? ' on' : ''}" data-cid="${esc(c.cid)}" data-page="${c._page || 1}" href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${esc(c.cid)}${pager ? '&page=' + (c._page || 1) : ''}">${esc(c.title)}</a>`).join('')
       : '<div class="empty">无匹配章节</div>';
     const on = tocList.querySelector('.toc-item.on');
     if (on) on.scrollIntoView({ block: 'center' });
@@ -1136,8 +1150,8 @@ function continueTarget(b, meta, prog) {
   // L7：id / cid / page 统一编码，避免属性与 URL 注入
   const bid = encodeURIComponent(b.id);
   return cid
-    ? `/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${encodeURIComponent(cid)}${prog && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}`
-    : `/book.html?src=${encodeURIComponent(src)}&id=${bid}`;
+    ? `${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bid}&cid=${encodeURIComponent(cid)}${prog && prog.page ? '&page=' + encodeURIComponent(prog.page) : ''}`
+    : `${BASE}/book.html?src=${encodeURIComponent(src)}&id=${bid}`;
 }
 
 // 书架一行（富信息：封面 / 标题 / 更新徽标 / 章节进度 / 最新章节）
@@ -1175,10 +1189,10 @@ function shelfRow(b, meta, prog, skeleton) {
   const contHref = continueTarget(b, meta, prog);
 
   return `<div class="shelf-item" data-id="${esc(b.id)}" data-src="${esc(src)}">
-    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${coverEl(b)}</a>
+    <a class="cover-link" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${coverEl(b)}</a>
     <div class="shelf-main">
       <div class="shelf-top">
-        <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${esc(b.title)}</a>
+        <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${esc(b.title)}</a>
         ${showUpdate ? '<span class="upd-badge">更新</span>' : ''}
       </div>
       <div class="shelf-progress${atLatest ? ' latest' : ''}">${esc(progressLine)}</div>
@@ -1195,13 +1209,13 @@ function historyRow(h) {
   const t = timeAgo(h.ts);
   const hid = encodeURIComponent(h.id);
   return `<div class="shelf-item" data-id="${esc(h.id)}" data-src="${esc(src)}">
-    <a class="cover-link" href="/book.html?src=${encodeURIComponent(src)}&id=${hid}">${coverEl(h)}</a>
+    <a class="cover-link" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${coverEl(h)}</a>
     <div class="shelf-main">
-      <a class="shelf-title" href="/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(h.title)}</a>
+      <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(h.title)}</a>
       <div class="shelf-progress">读到：${esc(h.ctitle || '未知章节')}</div>
       <div class="shelf-update">${t ? t + ' · ' : ''}${esc(h.author || '')}</div>
     </div>
-    <a class="shelf-cont-link" href="/read.html?src=${encodeURIComponent(src)}&bid=${hid}&cid=${encodeURIComponent(h.cid || '')}${h.page ? '&page=' + encodeURIComponent(h.page) : ''}">继续</a>
+    <a class="shelf-cont-link" href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${hid}&cid=${encodeURIComponent(h.cid || '')}${h.page ? '&page=' + encodeURIComponent(h.page) : ''}">继续</a>
   </div>`;
 }
 
@@ -1218,7 +1232,7 @@ function openRowMenu(anchor, { id, src, href }) {
   menu.dataset.rsrc = String(src);
   menu.innerHTML = `
     <a href="${esc(href)}">继续阅读</a>
-    <a href="/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}">查看详情</a>
+    <a href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}">查看详情</a>
     <button type="button" data-act="remove">移出书架</button>`;
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
@@ -1305,7 +1319,7 @@ async function shelfPage() {
       openRowMenu(more, {
         id,
         src,
-        href: more.dataset.href || `/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}`,
+        href: more.dataset.href || `${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(id)}`,
       });
       return;
     }
@@ -1350,22 +1364,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   initSearch();
   // 顶部导航：logo 可点回首页 + 全局「书架」入口
   const logo = document.querySelector('.logo');
-  if (logo && logo.tagName === 'SPAN') logo.outerHTML = '<a class="logo" href="/">' + logo.textContent + '</a>';
+  if (logo && logo.tagName === 'SPAN') logo.outerHTML = '<a class="logo" href="' + BASE + '/">' + logo.textContent + '</a>';
   const tb = document.querySelector('.topbar');
   if (tb && !tb.querySelector('.navlink')) {
     const sf = tb.querySelector('.search');
     const hist = document.createElement('a');
     hist.className = 'navlink';
-    hist.href = '/shelf.html';
+    hist.href = U('/shelf.html');
     hist.textContent = '历史';
     hist.addEventListener('click', (e) => {
       // 跳到书架页并直接切到「历史」标签
       e.preventDefault();
-      location.href = '/shelf.html?tab=history';
+      location.href = U('/shelf.html?tab=history');
     });
     const a = document.createElement('a');
     a.className = 'navlink';
-    a.href = '/shelf.html';
+    a.href = U('/shelf.html');
     a.textContent = '书架';
     tb.insertBefore(hist, sf);
     tb.insertBefore(a, sf);
@@ -1383,7 +1397,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (!document.querySelector('link[rel="icon"]')) {
     const link = document.createElement('link');
     link.rel = 'icon';
-    link.href = '/favicon.svg';
+    link.href = U('/favicon.svg');
     document.head.appendChild(link);
   }
 });

@@ -6,11 +6,23 @@ import { getSource, listSources, defaultSource, searchAll } from './lib/sources/
 import { createCache } from './lib/cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3100;
 
 const app = express();
 // 关闭 Express 默认 ETag：避免 /api 走 304 条件复用，缓存策略完全由下面显式控制
 app.set('etag', false);
+
+// ---------- BASE_PATH：整站挂到子路径下 ----------
+// 例如 BASE_PATH=/xiaoshuo 时，页面在 /xiaoshuo/、接口在 /xiaoshuo/api/... 下，
+// nginx 用「不剥离前缀」的方式反代（proxy_pass 不带尾斜杠）即可访问。
+// 为空（默认）保持原来的根路径行为；nginx 用「剥离前缀」方式反代时也无需设置。
+const BASE_PATH = (() => {
+  const raw = String(process.env.BASE_PATH || '').trim();
+  if (!raw || raw === '/') return '';
+  return '/' + raw.replace(/^\/+/, '').replace(/\/+$/, '');
+})();
+// 接口与静态资源统一挂在这个 router 上，挂载前缀就是 BASE_PATH
+const api = express.Router();
 
 // ---------- 缓存策略（集中配置，单位 ms）----------
 // 目录/最新章节/总章数不缓存（实时）；静态元数据按「目录指纹」校验缓存，见 /api/book。
@@ -30,7 +42,7 @@ const apiCache = createCache({ max: 500 });
 // 浏览器 / 代理层一律 no-store（每次都来问服务端）；服务端只缓存「不会变的部分」
 // （书籍静态元数据、章节目录的非末页），目录末页与最新章节始终实时回源。
 // 注意只匹配复数 book|chapters，单数 /api/chapter/*（正文）不受影响。
-app.use((req, res, next) => {
+api.use((req, res, next) => {
   if (/^\/api\/(book|chapters)\//.test(req.path)) res.set('Cache-Control', 'no-store');
   next();
 });
@@ -69,24 +81,22 @@ const withCache = (ttlMs, producer) =>
 // 取请求里的源 id（缺省用默认源）
 const srcOf = (req) => req.query.src || defaultSource;
 
-app.use(express.static(path.join(__dirname, 'public')));
-
 // 列表/发现类接口按 TTL 缓存；/api/book/* 与 /api/chapters/* 对浏览器一律 no-store，
 // 服务端只缓存静态元数据（带目录指纹）与章节目录的非末页。
 
 // 已启用数据源清单（搜索页筛选 chips 用）
-app.get('/api/sources', withCache(TTL.staticList, () => listSources()));
+api.get('/api/sources', withCache(TTL.staticList, () => listSources()));
 
-app.get('/api/home', withCache(TTL.list, (req) => getSource(srcOf(req)).getHome()));
+api.get('/api/home', withCache(TTL.list, (req) => getSource(srcOf(req)).getHome()));
 
-app.get('/api/categories', withCache(TTL.staticList, () => getSource(defaultSource).categoryList()));
+api.get('/api/categories', withCache(TTL.staticList, () => getSource(defaultSource).categoryList()));
 
-app.get('/api/ranks', withCache(TTL.staticList, () => getSource(defaultSource).rankList()));
+api.get('/api/ranks', withCache(TTL.staticList, () => getSource(defaultSource).rankList()));
 
 // 书籍详情：目录 / 分页 / 最新章节 / 总章数每次实时回源；静态元数据按「目录指纹」缓存。
 // 指纹由本次实时抓到的目录算得，一旦有新章，指纹必变 → 立即回源刷新 status/update，
 // 无需等 24h TTL，也不增加额外请求（目录本来就得抓）。浏览器侧一律 no-store。
-app.get(
+api.get(
   '/api/book/:src/:id',
   wrap(async (req, res) => {
     const src = req.params.src;
@@ -186,7 +196,7 @@ app.get(
 // 单页章节目录：浏览器一律 no-store；服务端按「章节追加式」特性缓存。
 // 新章只追加在末尾 ⇒ 非末页内容永不变（缓存 24h），末页（最新章节所在）每次实时回源。
 // 因此 book 页目录 / 阅读页跳章 / 书架更新检测都能第一时间看到新章节。
-app.get(
+api.get(
   '/api/chapters/:src/:id',
   wrap(async (req, res) => {
     const source = getSource(req.params.src);
@@ -239,31 +249,31 @@ app.get(
 );
 
 // 章节正文：发布后内容不再变化，长缓存；空正文不缓存（源站异常时下次仍会重试）。
-app.get(
+api.get(
   '/api/chapter/:src/:bid/:cid',
   withCache(TTL.chapter, (req) =>
     getSource(req.params.src).getChapter(req.params.cid, req.params.bid)
   )
 );
 
-app.get(
+api.get(
   '/api/category/:src/:cat',
   withCache(TTL.list, (req) => getSource(req.params.src).getCategory(req.params.cat))
 );
 
-app.get(
+api.get(
   '/api/rank/:src/:type',
   withCache(TTL.list, (req) => getSource(req.params.src).getRank(req.params.type))
 );
 
-app.get(
+api.get(
   '/api/quanben',
   withCache(TTL.list, (req) => getSource(srcOf(req)).getQuanben(req.query.sort))
 );
 
 // 合并搜索：跨所有已启用数据源，各自独立超时，结果统一带 src / srcName。
 // 缓存 5 分钟；结果为「有效数据」才写入（避免源站故障时空结果被缓存）。
-app.get(
+api.get(
   '/api/search',
   withCache(TTL.search, async (req) => {
     const q = req.query.q || '';
@@ -274,7 +284,7 @@ app.get(
 
 // 封面代理：避免直接外链被防盗链拦截（按 src 选择对应源站 base）。
 // 图片内容不可变，服务端按 Buffer 缓存 24h + 浏览器 24h；失败不缓存。
-app.get(
+api.get(
   '/api/cover',
   wrap(async (req, res) => {
     const src = req.query.src || defaultSource;
@@ -308,8 +318,22 @@ app.get(
   })
 );
 
+// ---------- 挂载：静态页面与接口统一挂在 BASE_PATH 下（默认 '' 即根路径）---------
+const mount = BASE_PATH || '/';
+if (BASE_PATH) {
+  // 不带尾斜杠的前缀入口补一个跳转，保证页面里的相对链接（assets/xxx）解析正确。
+  // 注意 Express 默认非严格路由，「/xiaoshuo/」也会匹配这条路由，所以必须按 req.path 精确判断，
+  // 否则会自己 301 到自己（重定向循环）。
+  app.get(BASE_PATH, (req, res, next) => {
+    if (req.path !== BASE_PATH) return next();
+    res.redirect(301, BASE_PATH + '/');
+  });
+}
+app.use(mount, express.static(path.join(__dirname, 'public')));
+app.use(mount, api);
+
 app.listen(PORT, () => {
-  console.log(`小说站运行中: http://localhost:${PORT}`);
+  console.log(`小说站运行中: http://localhost:${PORT}${BASE_PATH || '/'}`);
   // 预热默认源的本地搜索索引（best-effort）
   try {
     getSource(defaultSource).warmIndex?.();

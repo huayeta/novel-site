@@ -72,10 +72,48 @@ cd novel-site
 npm install          # 若遇到 npm 缓存权限错误，可加 --cache 指定可写目录：
                      #   npm install --cache ~/.npm-cache
 npm start            # 或 npm run dev（--watch 热重载）
-# 打开 http://localhost:3000
+# 打开 http://localhost:3100（端口用 PORT 环境变量可改）
 ```
 
 > 运行环境需要能访问外网 `m.keca.cc`（代理抓取源站内容）。
+
+## 挂到子路径下（BASE_PATH）
+
+站点可以整站挂在某个子路径（如 `http://host:8080/xiaoshuo/`）下，有两种方式，任选其一即可：
+
+**方式一（推荐）：反向代理剥离前缀**
+
+nginx 用带尾斜杠的 `proxy_pass` 去掉前缀，应用本身不用配置：
+
+```nginx
+location = /xiaoshuo { return 301 /xiaoshuo/; }
+location ^~ /xiaoshuo/ {
+    proxy_pass http://127.0.0.1:3100/;   # 末尾斜杠 = 剥离 /xiaoshuo 前缀
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_connect_timeout 120s;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+}
+```
+
+**方式二：应用感知前缀（nginx 不剥离）**
+
+```bash
+BASE_PATH=/xiaoshuo npm start
+```
+
+此时页面在 `/xiaoshuo/`、接口在 `/xiaoshuo/api/...` 下，nginx 直接 `proxy_pass http://127.0.0.1:3100;`（**不带**尾斜杠）即可。
+
+**实现说明**
+
+- 前端不依赖编译期常量：页面加载时由 `location.pathname` 反推站点前缀（`/xiaoshuo/read.html` → `/xiaoshuo`，根路径为 `''`），所有接口与站内跳转都通过 `BASE` / `U()` 补前缀；`public/*.html` 里的静态资源与页面链接用相对路径，天然跟随前缀。
+- 需要在页面里显式覆盖时，可注入 `window.__BASE_PATH__`（例如后端前缀与访问路径不一致的场景）。
+- 后端 `BASE_PATH` 只把静态资源与接口挂到该前缀下，缓存策略、指纹校验等行为不变；为空时与原来根路径模式完全一致。
+- 不带尾斜杠的前缀入口会 301 到带斜杠版本，保证相对链接解析正确。
+
+> 两种方式不要同时用：要么 nginx 剥离前缀（不设 `BASE_PATH`），要么应用带前缀（nginx 不剥离）。同时用会导致接口路径对不上。
 
 ## 目录结构
 

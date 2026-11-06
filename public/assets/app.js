@@ -15,9 +15,8 @@ const BASE = (() => {
 const U = (u) => (typeof u === 'string' && u.charAt(0) === '/' ? BASE + u : u);
 
 // L8：默认源不再硬编码，启动后由 /api/sources（后端按 SOURCES 环境变量算出的启用列表）
-// 的第一个动态覆盖；迁移旧数据时仍用 'keca'（旧书架本来就是 keca）。
-const LEGACY_SRC = 'keca';
-let DEFAULT_SRC = LEGACY_SRC;
+// 的第一个动态覆盖；'keca' 仅作为接口失败时的兜底。
+let DEFAULT_SRC = 'keca';
 // 当前页面所处数据源（书籍/阅读/搜索等页通过 ?src= 传入；缺省默认源）
 const URL_SRC = (() => {
   try { return new URLSearchParams(location.search).get('src') || ''; }
@@ -52,34 +51,60 @@ function qs() {
   return Object.fromEntries(new URLSearchParams(location.search));
 }
 
-// 旧版 localStorage 数据迁移到「src:id」键结构（仅执行一次，保留用户书架/历史）
-function migrateStore() {
-  try {
-    if (localStorage.getItem('qingjian_v') === '1') return;
-    const bm = JSON.parse(localStorage.getItem('qingjian_shelf') || '[]');
-    localStorage.setItem(
-      'qingjian_shelf',
-      JSON.stringify(bm.map((b) => (b.src ? b : { ...b, src: LEGACY_SRC })))
-    );
-    const hs = JSON.parse(localStorage.getItem('qingjian_history') || '[]');
-    localStorage.setItem(
-      'qingjian_history',
-      JSON.stringify(hs.map((h) => (h.src ? h : { ...h, src: LEGACY_SRC })))
-    );
-    const del = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('progress:') && !k.startsWith('progress:' + LEGACY_SRC + ':')) {
-        const id = k.slice('progress:'.length);
-        localStorage.setItem('progress:' + LEGACY_SRC + ':' + id, localStorage.getItem(k));
-        del.push(k);
-      }
-    }
-    del.forEach((k) => localStorage.removeItem(k));
-    localStorage.setItem('qingjian_v', '1');
-  } catch (e) {}
+// ============ 用户数据：单一状态对象（为云同步设计）============
+// 所有用户数据收敛到一个 key，内部按 "src:id" 做 Map，每条带 ts / 墓碑。
+// 云端同步时 GET 响应可直接 apply、PUT body 直接就是本对象，零格式转换；
+// 所有写入都经 saveState()，同步 hook / 变更通知只需挂一处。
+// 注意：qj_cache_* 是纯本地缓存（TTL/LRU/剩余寿命对齐），不在此对象内、也不同步。
+const STATE_KEY = 'qingjian_userdata';
+const STATE_VERSION = 2;
+const HIST_MAX = 80;
+const READER_DEFAULT = { fs: 19, lh: 1.8, theme: 'day' };
+const LH_OPTIONS = [1.6, 1.8, 2.0];
+
+function entityKey(src, id) { return (src || DEFAULT_SRC) + ':' + String(id); }
+
+function defaultState() {
+  return {
+    v: STATE_VERSION,
+    updatedAt: 0,
+    books: {},      // Map<"src:id", {src,id,title,author,cover,addedAt,ts,deleted}>
+    progress: {},   // Map<"src:id", {cid,title,page?,ts}>
+    seen: {},       // Map<"src:id", {cid,ts,deleted}>
+    history: [],    // 数组，条目自带 ts，天然按时间归并
+    reader: { ...READER_DEFAULT },
+  };
 }
-migrateStore();
+
+let _state = null;
+function loadState() {
+  if (_state) return _state;
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) {}
+  if (!s || typeof s !== 'object' || s.v !== STATE_VERSION) s = defaultState();
+  // 防御性补齐，避免半写入 / 手工改坏导致白屏
+  if (!s.books || typeof s.books !== 'object' || Array.isArray(s.books)) s.books = {};
+  if (!s.progress || typeof s.progress !== 'object' || Array.isArray(s.progress)) s.progress = {};
+  if (!s.seen || typeof s.seen !== 'object' || Array.isArray(s.seen)) s.seen = {};
+  if (!Array.isArray(s.history)) s.history = [];
+  if (!s.reader || typeof s.reader !== 'object') s.reader = { ...READER_DEFAULT };
+  _state = s;
+  return s;
+}
+// silent=true：仅持久化，不触发同步 hook（云同步把远端数据写回本地时用，避免同步循环）
+function saveState(silent) {
+  const s = loadState();
+  s.updatedAt = Date.now();
+  try { localStorage.setItem(STATE_KEY, JSON.stringify(s)); } catch (e) {}
+  if (!silent && _stateChangeHook) { try { _stateChangeHook(); } catch (e) {} }
+}
+let _stateChangeHook = null;
+function setStateChangeHook(fn) { _stateChangeHook = typeof fn === 'function' ? fn : null; }
+
+// 多标签页：另一个标签页改了状态就作废内存缓存，下次读取重新解析
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('storage', (e) => { if (!e.key || e.key === STATE_KEY) _state = null; });
+}
 
 function coverEl(b) {
   const src = b.src || curSrc;
@@ -134,27 +159,19 @@ function statusBadge(s) {
 }
 
 function setProgress(src, bid, cid, title, page) {
-  try {
-    const o = { cid, title: title || '' };
-    if (page) o.page = page; // 分页源：记录当前所在页，便于「继续阅读」直接定位
-    localStorage.setItem('progress:' + src + ':' + bid, JSON.stringify(o));
-  } catch (e) {}
+  const s = loadState();
+  const k = entityKey(src, bid);
+  const o = { cid, title: title || '', ts: Date.now() };
+  if (page) o.page = page; // 分页源：记录当前所在页，便于「继续阅读」直接定位
+  const old = s.progress[k];
+  // 内容没变就不刷 ts，避免同步时无谓地把另一台设备的新进度判为旧数据
+  if (old && old.cid === o.cid && old.title === o.title && old.page === o.page) return;
+  s.progress[k] = o;
+  saveState();
 }
 function getProgress(src, bid) {
-  try {
-    const v = localStorage.getItem('progress:' + src + ':' + bid);
-    if (!v) return null;
-    try {
-      const o = JSON.parse(v);
-      if (o && o.cid) return o;
-    } catch (e) {}
-    // L11：旧版纯字符串可能是 "null"/"undefined" 等脏值，不能当成有效 cid
-    const s = String(v).trim();
-    if (!s || /^(null|undefined|\[object Object\])$/i.test(s)) return null;
-    return { cid: s }; // 兼容旧版纯字符串存储
-  } catch (e) {
-    return null;
-  }
+  const o = loadState().progress[entityKey(src, bid)];
+  return o && o.cid ? o : null;
 }
 
 // 从分类链接里安全取出分类 key（避免源站链接异常导致详情页白屏）
@@ -182,16 +199,14 @@ function chapterHealth(chapters, isPartial) {
   return '';
 }
 
-// ============ 阅读器设置（localStorage）============
-const READER_KEY = 'qingjian_reader';
-const READER_DEFAULT = { fs: 19, lh: 1.8, theme: 'day' };
-const LH_OPTIONS = [1.6, 1.8, 2.0];
+// ============ 阅读器设置（统一状态对象）============
 function getReaderSettings() {
-  try { return { ...READER_DEFAULT, ...JSON.parse(localStorage.getItem(READER_KEY) || '{}') }; }
-  catch (e) { return { ...READER_DEFAULT }; }
+  return { ...READER_DEFAULT, ...loadState().reader };
 }
 function saveReaderSettings(s) {
-  try { localStorage.setItem(READER_KEY, JSON.stringify(s)); } catch (e) {}
+  // 带 ts：云同步按「最后修改的设备为准」合并阅读器设置
+  loadState().reader = { ...s, ts: Date.now() };
+  saveState();
 }
 function applyReaderSettings(s) {
   const root = document.documentElement;
@@ -200,18 +215,43 @@ function applyReaderSettings(s) {
   root.setAttribute('data-theme', s.theme);
 }
 
-// ============ 本地书架（收藏，localStorage）============
-const BM_KEY = 'qingjian_shelf';
+// ============ 本地书架（统一状态对象）============
+// 对外仍返回/接收数组，保持所有调用方签名不变；saveBookmarks 做差异合并，
+// 「数组里消失的书」自动转成墓碑 deleted:true —— 同步时删除才不会在另一台设备复活。
 function getBookmarks() {
-  try { return JSON.parse(localStorage.getItem(BM_KEY) || '[]'); } catch (e) { return []; }
+  return Object.values(loadState().books)
+    .filter((b) => b && !b.deleted)
+    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
+    .map((b) => ({ src: b.src, id: b.id, title: b.title, author: b.author, cover: b.cover, addedAt: b.addedAt }));
 }
 function saveBookmarks(list) {
-  try { localStorage.setItem(BM_KEY, JSON.stringify(list)); } catch (e) {}
+  const s = loadState();
+  const now = Date.now();
+  const keep = new Set();
+  (list || []).forEach((b, i) => {
+    const src = b.src || DEFAULT_SRC;
+    const k = entityKey(src, b.id);
+    keep.add(k);
+    const old = s.books[k];
+    const base = old && !old.deleted ? old : null;
+    const title = b.title || '', author = b.author || '', cover = b.cover || '';
+    // 只有字段真的变了才刷 ts；重新收藏一本已删的书视为新增
+    const changed = !base || base.title !== title || base.author !== author || base.cover !== cover;
+    s.books[k] = {
+      src, id: b.id, title, author, cover,
+      addedAt: base ? base.addedAt : (b.addedAt || now - i), // 新收藏靠前
+      ts: changed ? now : (base ? base.ts : now),
+      deleted: false,
+    };
+  });
+  Object.keys(s.books).forEach((k) => {
+    if (!keep.has(k) && !s.books[k].deleted) { s.books[k].deleted = true; s.books[k].ts = now; }
+  });
+  saveState();
 }
 function isBookmarked(src, id) {
-  return getBookmarks().some(
-    (x) => (x.src || DEFAULT_SRC) === (src || DEFAULT_SRC) && String(x.id) === String(id)
-  );
+  const b = loadState().books[entityKey(src, id)];
+  return !!(b && !b.deleted);
 }
 function toggleBookmark(b) {
   const src = b.src || DEFAULT_SRC;
@@ -236,14 +276,13 @@ function removeBookmark(src, id) {
   }
 }
 
-// ============ 阅读历史（localStorage）============
-const HIST_KEY = 'qingjian_history';
-const HIST_MAX = 80;
+// ============ 阅读历史（统一状态对象）============
 function getHistory() {
-  try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) { return []; }
+  return loadState().history.slice();
 }
 function saveHistory(list) {
-  try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch (e) {}
+  loadState().history = (list || []).slice(0, HIST_MAX);
+  saveState();
 }
 // 记录/更新一本书的阅读历史（置顶，按 源+书 去重）
 function addHistory(b) {
@@ -322,33 +361,32 @@ async function getBookMeta(id, src) {
   }
 }
 
-// ============ 新章「已读基线」（localStorage）============
+// ============ 新章「已读基线」（统一状态对象）============
 // 记录用户上次点进本书时看到的最新章节 cid。书架据此判断「源站是否出了新章」。
 // 关键约束：基线只在「点进书籍页/阅读页」时刷新；书架页绝不能主动刷新，
 // 否则每次打开书架都会把基线拉到当前最新章，「更新」永远不亮。
-const SEEN_KEY = 'qingjian_seen_latest';
-function readSeenMap() {
-  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}') || {}; }
-  catch (e) { return {}; }
-}
+function readSeenMap() { return loadState().seen; }
 function getSeenLatest(src, id) {
-  return readSeenMap()[src + ':' + id] || '';
+  const e = readSeenMap()[entityKey(src, id)];
+  return e && !e.deleted && e.cid ? e.cid : '';
 }
 function markSeenLatest(src, id, cid) {
   if (!cid) return;
-  try {
-    const m = readSeenMap();
-    if (m[src + ':' + id] === cid) return;
-    m[src + ':' + id] = cid;
-    localStorage.setItem(SEEN_KEY, JSON.stringify(m));
-  } catch (e) {}
+  const s = loadState();
+  const k = entityKey(src, id);
+  const old = s.seen[k];
+  // 相同则完全不动（保留原 ts），避免无谓写入把同步基线判成"刚改过"
+  if (old && !old.deleted && old.cid === cid) return;
+  s.seen[k] = { cid, ts: Date.now(), deleted: false };
+  saveState();
 }
 function clearSeenLatest(src, id) {
-  try {
-    const m = readSeenMap();
-    delete m[src + ':' + id];
-    localStorage.setItem(SEEN_KEY, JSON.stringify(m));
-  } catch (e) {}
+  const s = loadState();
+  const k = entityKey(src, id);
+  if (!s.seen[k]) return;
+  // 墓碑而非物理删除：移出书架后基线清空，同步时另一台设备不会把旧基线推回来
+  s.seen[k] = { cid: '', ts: Date.now(), deleted: true };
+  saveState();
 }
 // 冷启动兜底：老用户升级 / 刚收藏的书没有基线。首次在书架看到它时，
 // 静默用「当前最新章节」建立基线（本次不亮），此后才进入正常的「出新章→亮」循环。
@@ -1349,13 +1387,21 @@ async function shelfPage() {
   if (tabs) tabs.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
   renderShelf().catch(() => {});
-  // 下拉刷新（公共模块）：只在书架标签可见时生效，刷新时保留现有行、拉取实时 /api/book
+  // 云同步（同步码）：同步成功后重渲染书架，让「更新」徽标 / 进度立刻反映远端数据
+  if (globalThis.QJSync) {
+    QJSync.mount({ onSynced: () => renderShelf({ keepOld: true }) });
+  }
+  // 下拉刷新（公共模块）：先同步再重渲染，顺带把另一台设备的改动拉过来。
+  // 同步失败静默降级，不能让转圈卡住；onSynced:false 避免重复触发一次渲染。
   if (globalThis.PullToRefresh) {
     PullToRefresh.mount({
       content: document.querySelector('.wrap'),
       anchor: document.querySelector('.topbar'),
       canRefresh: () => !!paneShelf && !paneShelf.hidden,
-      onRefresh: () => renderShelf({ keepOld: true }),
+      onRefresh: async () => {
+        if (globalThis.QJSync) await QJSync.syncNow({ timeout: 5000, onSynced: false }).catch(() => {});
+        await renderShelf({ keepOld: true });
+      },
     });
   }
   // 支持从顶部导航「历史」直接进到历史标签

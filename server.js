@@ -6,6 +6,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { getSource, listSources, defaultSource, searchAll } from './lib/sources/index.js';
 import { createCache } from './lib/cache.js';
+import * as syncStore from './lib/sync-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -321,6 +322,36 @@ api.get(
     res.send(hit.buf);
   })
 );
+
+// ---------- 同步码云同步（单人使用，无账号、不加密）----------
+// 数据就是前端的统一状态对象 qingjian_userdata，服务端只做版本化存取，不解析内容。
+// 三个接口一律 no-store；同步码用 sha256 做文件名，见 lib/sync-store.js。
+const syncNoStore = (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+
+api.post('/api/sync/new', syncNoStore, (req, res) => {
+  res.json({ code: syncStore.generateCode() });
+});
+
+api.get('/api/sync/:code', syncNoStore, (req, res) => {
+  const code = req.params.code;
+  if (!syncStore.isValidCode(code)) return res.status(400).json({ error: 'invalid code' });
+  const cur = syncStore.read(code);
+  if (!cur) return res.status(404).json({ rev: 0, data: null });
+  res.json({ rev: cur.rev, updatedAt: cur.updatedAt, data: cur.data });
+});
+
+api.put('/api/sync/:code', syncNoStore, express.json({ limit: '600kb' }), wrap(async (req, res) => {
+  const code = req.params.code;
+  if (!syncStore.isValidCode(code)) return res.status(400).json({ error: 'invalid code' });
+  const { baseRev, data } = req.body || {};
+  if (!data || typeof data !== 'object' || typeof baseRev !== 'number') {
+    return res.status(400).json({ error: 'bad payload' });
+  }
+  const r = await syncStore.write(code, { baseRev, data });
+  if (r.conflict) return res.status(409).json({ rev: r.rev, data: r.data });
+  if (!r.ok) return res.status(400).json({ error: r.error || 'write failed' });
+  res.json({ rev: r.rev });
+}));
 
 // ---------- 挂载：静态页面与接口统一挂在 BASE_PATH 下（默认 '' 即根路径）---------
 const mount = BASE_PATH || '/';

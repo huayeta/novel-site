@@ -10,15 +10,63 @@
 - **阅读器**：章节正文、上一章/下一章/目录导航，阅读进度自动保存到本地（localStorage）。
 - **搜索**：基于本地索引（抓取列表页建立书名/作者索引）的模糊搜索。
 - **封面代理**：通过后端代理书籍封面，规避源站防盗链。
-- **下拉刷新（书架 / 书籍详情）**：iOS 风格手势（阻尼跟手 → 阈值翻转箭头 → 松手转圈 → 完成打勾回弹），触摸与鼠标拖拽均可。抽成自包含公共模块 `public/assets/pull-refresh.js`（自动注入样式、自动创建指示器，暴露 `mount / refresh / destroy`），页面只需引入脚本并调用一次 `PullToRefresh.mount({ content, anchor, onRefresh, canRefresh })`。刷新一律**不写 `qingjian_seen_latest` 基线**，「更新」徽标逻辑不受影响。
+- **下拉刷新（书架 / 书籍详情）**：iOS 风格手势（阻尼跟手 → 阈值翻转箭头 → 松手转圈 → 完成打勾回弹），触摸与鼠标拖拽均可。抽成自包含公共模块 `public/assets/pull-refresh.js`（自动注入样式、自动创建指示器，暴露 `mount / refresh / destroy`），页面只需引入脚本并调用一次 `PullToRefresh.mount({ content, anchor, onRefresh, canRefresh })`。`onRefresh` 一律**不写 `qingjian_userdata.seen` 基线**，「更新」徽标逻辑不受影响。
   - 书架页：每本书重新实时拉 `/api/book`，保留旧行不闪骨架；仅在顶部且「书架」标签可见时生效。
   - 书籍详情页：重新拉 `/api/book` 就地更新元信息 + 章节目录，**保留当前页码、正/倒序、收藏按钮绑定**；分页源会额外重拉当前目录页（原本在末页则跟到新末页）。
+- **云同步（同步码）**：单人使用、无账号、不加密。设备 A 生成一个同步码，设备 B 在书架页输入同一个码即可自动同步书架、阅读进度、「更新」基线与阅读历史。详见下方「云同步」一节。
 
 ## 技术栈
 
 - 后端：Node.js + Express + cheerio（HTML 解析）+ 原生 `fetch`。
 - 前端：原生 HTML/CSS/JS，移动端优先，无构建步骤。
 - 缓存：服务端内存 TTL 缓存（`lib/cache.js`）+ 浏览器 `Cache-Control` + 前端 localStorage（TTL/LRU）。详见下方「缓存策略」。
+
+## 本地用户数据结构
+
+所有用户数据收敛在**单一 localStorage key** `qingjian_userdata`（为云同步设计，云端格式 = 本地格式，同步时零格式转换）：
+
+```jsonc
+{
+  "v": 2, "updatedAt": 1730000000000,
+  "books":    { "keca:1": { "src","id","title","author","cover", "addedAt", "ts", "deleted" } },
+  "progress": { "keca:1": { "cid","title","page?", "ts" } },
+  "seen":     { "keca:1": { "cid", "ts", "deleted" } },
+  "history":  [ { "src","id","title","cid","ctitle","page?","ts" } ],
+  "reader":   { "fs": 19, "lh": 1.8, "theme": "day", "ts": 1730000000000 }
+}
+```
+
+设计要点：
+
+- **稳定唯一键**：`books` / `progress` / `seen` 全部用 `"src:id"` 做 Map 的 key，合并时天然按实体对齐。
+- **每条带 `ts`**：冲突裁决取 ts 大的；内容没变就不刷 ts，避免同步时无谓地把另一台设备的数据判为旧。
+- **删除用墓碑**：`saveBookmarks()` 会把「数组里消失的书」标成 `deleted:true`，`clearSeenLatest()` 同理。物理删除会让另一端把条目推回来「复活」。
+- **统一写入口**：所有写入经 `saveState()`，同步 hook / 变更通知只需挂一处（`setStateChangeHook()` 已预留）。`loadState()` 有内存缓存 + `storage` 事件失效，并做防御性字段补齐。
+- **对外签名不变**：`getBookmarks()` 仍返回数组、`saveBookmarks(list)` 仍收数组，所有页面调用方无需感知底层结构。
+- **与缓存层隔离**：`qj_cache_*`（TTL / LRU / 服务端剩余寿命对齐）是纯本地缓存，不在此对象内、也不同步。章节正文、列表结果可随时重建。
+- 项目尚未上线，不含旧版数据迁移逻辑；`v` 字段留作未来结构升级用。
+
+## 云同步（同步码）
+
+面向**单人、多设备**的最简同步：不需要账号，数据明文存在自己服务器的 `data/sync/` 下（已加入 `.gitignore`，不会被提交）。
+
+**使用**：书架页顶部「云同步」状态条 → 设置 →
+
+- 设备 A：点「生成新同步码」，复制显示的 `XXXX-XXXX-XXXX`；
+- 设备 B：点「输入已有同步码」，填入同一个码 → 自动拉取并**合并**（不是覆盖，B 上已有的本地书不会丢）；
+- 之后两端自动同步，状态条显示上次同步时间；可「立即同步」「更换同步码」「关闭同步」。关闭/更换只清本地配置，**不删书架数据**。
+
+**同步范围**：`qingjian_userdata` 里的 `books` / `progress` / `seen` / `history` / `reader`（字号、行距、主题）。`reader` 按 `ts` 取最后修改的设备为准，老数据无 `ts` 时本地优先；设置改动会在目标设备**下次打开阅读页时生效**。`qj_cache_*` 缓存从不同步。
+
+**实现**：
+
+- 服务端 `lib/sync-store.js`：一个码对应一个 JSON 文件，文件名是 `sha256(码)`（防目录穿越、不暴露原码）；原子写（tmp → rename）、同码写入串行化、512KB 上限。
+- 接口（一律 `no-store`）：`POST /api/sync/new` 生成码、`GET /api/sync/:code` 拉取、`PUT /api/sync/:code` 提交。PUT 带 `baseRev` 做乐观锁，版本不匹配返回 `409` + 最新数据，客户端合并后自动重试（最多 3 次）。
+- 前端 `public/assets/sync.js`：自包含模块（自动注入样式与 UI），暴露 `mount / syncNow / scheduleSync`。云端格式就是本地状态对象，**零格式转换**。
+- 合并规则：`books` / `progress` / `seen` 按 `src:id` 取 `ts` 大者（同 ts 本地优先）；删除墓碑靠 ts 裁决，重新收藏（更新的 ts）能赢过墓碑；`history` 按 `src:id` 去重取 ts 大、倒序截断 80 条；`reader` 按 ts 取最后修改的设备为准。
+- 触发时机：页面启动、本地数据变更（防抖 2s）、回到前台、**书架下拉刷新**、手动「立即同步」。同步失败静默降级，绝不阻塞本地读写。
+
+> 安全提示：同步码即凭证，拿到码的人可读写你的书架与阅读记录；数据不加密，请勿在公网环境使用或公开同步码。同步接口无鉴权，建议只在私有部署 / 内网使用。
 
 ## 缓存策略
 
@@ -46,7 +94,7 @@
 - 这两个接口对浏览器/代理一律 `Cache-Control: no-store`；服务端缓存仅作用于「不会变的部分」。
 - 前端 `getBookData()` 直连 `/api/book`，不走任何 localStorage 缓存。
 
-**书架「更新」徽标**：通知型「新章检测」。`localStorage`（`qingjian_seen_latest`）记录上次**点进本书**时看到的最新章节 cid：
+**书架「更新」徽标**：通知型「新章检测」。统一状态对象 `qingjian_userdata` 的 `seen` 字段记录上次**点进本书**时看到的最新章节 cid：
 
 - 源站出了新章（实时最新 cid ≠ 基线）→ 亮「更新」；
 - 点进书籍页 / 阅读页 → 刷新基线，徽标熄灭，直到源站再出新章才重新亮；

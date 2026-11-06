@@ -229,6 +229,38 @@ html[data-theme="eye"] .reader-tools button { background: #ece1c8; color: #5b4a2
 .tabs .tab.on { background: var(--primary); color: #fff; border-color: var(--primary); font-weight: 600; }
 .linkbtn { border: 0; background: transparent; color: var(--primary); font-size: 14px; cursor: pointer; }
 
+/* ===== 书架下拉刷新（iOS 风格） =====
+   指示器固定在顶栏下方，高度由 JS 随下拉距离增长；内容整体下移让出空间。
+   拖拽时无过渡（跟手），松手/刷新收起时加 .settling 做弹性回弹。 */
+.ptr {
+  position: fixed; left: 0; right: 0; top: 0;
+  z-index: 15; height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none; will-change: height;
+}
+.ptr.settling { transition: height .3s cubic-bezier(.22,.61,.36,1); }
+.ptr-inner {
+  flex: 1; height: 100%; min-height: 0;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: var(--muted); font-size: 13px;
+  opacity: 0; transform: scale(.82);
+  transition: opacity .12s linear, transform .12s linear;
+}
+.ptr-icon { display: inline-flex; width: 20px; height: 20px; transition: transform .2s ease; }
+.ptr.ready .ptr-icon { transform: rotate(180deg); }
+.ptr-spinner {
+  width: 18px; height: 18px; border: 2px solid var(--border);
+  border-top-color: var(--primary); border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.ptr-check {
+  width: 20px; height: 20px; display: inline-flex; align-items: center;
+  justify-content: center; color: var(--primary); font-size: 16px; font-weight: 700;
+}
+.ptr [hidden] { display: none !important; }
+.ptr-content.settling { transition: transform .3s cubic-bezier(.22,.61,.36,1); }
+body[data-page="shelf"] { overscroll-behavior-y: contain; }
+
 /* 书架 / 历史：富信息行 */
 .shelf-item {
   display: flex; gap: 12px; align-items: flex-start;

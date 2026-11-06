@@ -1256,7 +1256,7 @@ async function mapLimit(items, limit, fn) {
 }
 
 let _shelfRenderSeq = 0;
-async function renderShelf() {
+async function renderShelf(opts = {}) {
   const box = document.getElementById('shelf');
   if (!box) return;
   const seq = ++_shelfRenderSeq; // 每次重渲染作废旧结果，避免删除后又被旧 Promise.all 覆盖
@@ -1268,8 +1268,9 @@ async function renderShelf() {
     return;
   }
   const isFresh = () => seq === _shelfRenderSeq;
-  // L5：骨架态还没有 meta，先不渲染 ⋮ 菜单，避免「继续」落到错误链接
-  box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id), true)).join('');
+  // L5：骨架态还没有 meta，先不渲染 ⋮ 菜单，避免「继续」落到错误链接。
+  // 下拉刷新传 keepOld：保留现有行直到实时数据回来，避免刷新时整页闪一下骨架。
+  if (!opts.keepOld) box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id), true)).join('');
   const metas = await mapLimit(list, 4, (b) => getBookMeta(b.id, b.src || curSrc));
   if (!isFresh()) return;
   // 冷启动：为没有基线的书建立起点（本次不亮），之后只在点进书时刷新基线。
@@ -1292,6 +1293,144 @@ function renderHistory() {
     : '<div class="empty">还没有阅读历史，去随便读几章吧～</div>';
 }
 
+// ============ 书架下拉刷新（iOS 风格） ============
+// 只在「页面已滚到顶部 + 书架标签可见」时生效。下拉用阻尼位移跟手，超过阈值
+// 松手才触发 onRefresh（内部是实时 /api/book，绝不写 seen 基线，不影响「更新」徽标）。
+// 触摸为主，附带鼠标拖拽以便桌面浏览器也能体验。
+function initPullToRefresh({ canRefresh, onRefresh }) {
+  const ptr = document.getElementById('ptr');
+  const content = document.querySelector('.ptr-content');
+  const topbar = document.querySelector('.topbar');
+  const inner = document.getElementById('ptrInner');
+  const icon = document.getElementById('ptrIcon');
+  const spinner = document.getElementById('ptrSpinner');
+  const check = document.getElementById('ptrCheck');
+  const text = document.getElementById('ptrText');
+  if (!ptr || !content || !inner) return;
+
+  const THRESHOLD = 64;   // 松手触发刷新的位移
+  const MAX_PULL = 112;   // 阻尼后的最大下拉距离
+  let startY = 0, pull = 0;
+  let tracking = false, pulling = false, refreshing = false, moved = false;
+
+  const scrollTop = () => window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  const atTop = () => scrollTop() <= 0;
+
+  function render(px) {
+    pull = Math.max(0, Math.min(MAX_PULL, px));
+    ptr.style.height = pull + 'px';
+    content.style.transform = pull ? `translateY(${pull}px)` : '';
+    const p = Math.min(1, pull / THRESHOLD);
+    inner.style.opacity = String(p);
+    inner.style.transform = `scale(${(0.82 + 0.18 * p).toFixed(3)})`;
+    // 标签/箭头随位移实时更新（包含「拉过阈值又滑回去」的回退）；刷新中由 doRefresh 接管文案
+    if (!refreshing) {
+      const ready = pull >= THRESHOLD;
+      ptr.classList.toggle('ready', ready);
+      text.textContent = ready ? '释放立即刷新' : '下拉刷新';
+    }
+  }
+
+  // 阻尼：线性跟手，过阈值后阻力骤增，模拟 iOS 橡皮筋
+  function damped(delta) {
+    if (delta <= 0) return 0;
+    const linear = delta * 0.55;
+    const rubber = linear > THRESHOLD ? THRESHOLD + (linear - THRESHOLD) * 0.35 : linear;
+    return Math.min(MAX_PULL, rubber);
+  }
+
+  function begin(y) {
+    if (refreshing || !atTop() || (canRefresh && !canRefresh())) return;
+    tracking = true; pulling = false; moved = false; startY = y;
+    ptr.style.top = (topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+    ptr.classList.remove('settling'); content.classList.remove('settling');
+  }
+
+  function move(y, ev) {
+    if (!tracking || refreshing) return;
+    const delta = y - startY;
+    if (delta <= 0) {
+      if (pulling) { render(0); pulling = false; }
+      return;
+    }
+    if (!atTop()) { cancel(); return; }           // 期间被惯性滚动带离顶部则放弃
+    if (ev && ev.cancelable) ev.preventDefault(); // 阻止 iOS 原生回弹 / 桌面选中文字
+    pulling = true; moved = true;
+    render(damped(delta));
+  }
+
+  function cancel() {
+    if (pulling) settle(0);
+    tracking = false; pulling = false;
+  }
+
+  function settle(target) {
+    ptr.classList.add('settling'); content.classList.add('settling');
+    render(target);
+    window.setTimeout(() => {
+      ptr.classList.remove('settling'); content.classList.remove('settling');
+    }, 320);
+  }
+
+  function reset() {
+    ptr.classList.remove('ready', 'refreshing');
+    icon.hidden = false; spinner.hidden = true; check.hidden = true;
+    text.textContent = '下拉刷新';
+    render(0);
+  }
+
+  async function doRefresh() {
+    refreshing = true;
+    ptr.classList.remove('ready');
+    ptr.classList.add('refreshing', 'settling');
+    content.classList.add('settling');
+    render(THRESHOLD);                 // 停在阈值高度，和 iOS 一样
+    icon.hidden = true; spinner.hidden = false; check.hidden = true;
+    text.textContent = '正在刷新…';
+    try { await onRefresh(); } catch (e) { /* 失败也照常收起，不卡住手势 */ }
+    spinner.hidden = true; check.hidden = false;
+    text.textContent = '刷新完成';
+    await new Promise((r) => window.setTimeout(r, 420));
+    settle(0);
+    await new Promise((r) => window.setTimeout(r, 320));
+    reset();
+    refreshing = false;
+  }
+
+  function end() {
+    if (!tracking || refreshing) return;
+    tracking = false;
+    if (pulling && pull >= THRESHOLD) doRefresh();
+    else if (pulling) settle(0);
+    pulling = false;
+  }
+
+  // —— 触摸（iOS / Android）——
+  document.addEventListener('touchstart', (e) => {
+    moved = false;
+    if (e.touches.length !== 1) return;
+    begin(e.touches[0].clientY);
+  }, { passive: true });
+  document.addEventListener('touchmove', (e) => {
+    if (!tracking) return;
+    move(e.touches[0].clientY, e);
+  }, { passive: false });
+  document.addEventListener('touchend', end, { passive: true });
+  document.addEventListener('touchcancel', cancel, { passive: true });
+
+  // —— 鼠标（桌面）；下拉后抑制误触点击 ——
+  document.addEventListener('mousedown', (e) => {
+    moved = false;
+    if (e.button !== 0) return;
+    begin(e.clientY);
+  });
+  document.addEventListener('mousemove', (e) => { if (tracking) move(e.clientY, e); });
+  document.addEventListener('mouseup', end);
+  document.addEventListener('click', (e) => {
+    if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
+  }, true);
+}
+
 async function shelfPage() {
   // 标签切换
   const tabs = document.getElementById('shelfTabs');
@@ -1306,6 +1445,11 @@ async function shelfPage() {
   if (tabs) tabs.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
   renderShelf().catch(() => {});
+  // 下拉刷新：只在书架标签可见时生效，刷新时保留现有行、拉取实时 /api/book
+  initPullToRefresh({
+    canRefresh: () => paneShelf && !paneShelf.hidden,
+    onRefresh: () => renderShelf({ keepOld: true }),
+  });
   // 支持从顶部导航「历史」直接进到历史标签
   if (qs().tab === 'history') switchTab('history');
 

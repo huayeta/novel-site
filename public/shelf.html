@@ -17,17 +17,7 @@
     </form>
   </header>
 
-  <!-- 下拉刷新指示器（iOS 风格）：默认高度为 0，随手指下拉展开 -->
-  <div class="ptr" id="ptr" aria-hidden="true">
-    <div class="ptr-inner" id="ptrInner">
-      <span class="ptr-icon" id="ptrIcon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="4" x2="12" y2="19"></line><polyline points="6 13 12 19 18 13"></polyline></svg></span>
-      <span class="ptr-spinner" id="ptrSpinner" hidden></span>
-      <span class="ptr-check" id="ptrCheck" hidden>✓</span>
-      <span class="ptr-text" id="ptrText">下拉刷新</span>
-    </div>
-  </div>
-
-  <div class="wrap ptr-content">
+  <div class="wrap">
     <div class="tabs" id="shelfTabs">
       <button class="tab on" data-tab="shelf" type="button">书架</button>
       <button class="tab" data-tab="history" type="button">历史</button>
@@ -48,6 +38,7 @@
   </div>
 
   <div id="error" class="empty"></div>
+  <script src="assets/pull-refresh.js"></script>
   <script src="assets/app.js"></script>
 </body>
 </html>

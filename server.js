@@ -2,10 +2,14 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import { getSource, listSources, defaultSource, searchAll } from './lib/sources/index.js';
 import { createCache } from './lib/cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const ASSETS_DIR = path.join(PUBLIC_DIR, 'assets');
 const PORT = process.env.PORT || 3100;
 
 const app = express();
@@ -329,7 +333,71 @@ if (BASE_PATH) {
     res.redirect(301, BASE_PATH + '/');
   });
 }
-app.use(mount, express.static(path.join(__dirname, 'public')));
+// ---------- 前端资源版本化（cache busting）----------
+// 版本号 = package.json 的 version + public/assets/ 下所有文件的内容 hash。
+// 任一 JS/CSS 改动（或手动升 version）都会让 HTML 里的 ?v= 变化，浏览器自动请求新 URL；
+// HTML 本身一律 no-cache（带 ETag 协商，几乎零流量），保证用户普通刷新就能拿到新页面，
+// 不会出现「旧 HTML 里没有新脚本引用」导致新功能永远看不到的情况。
+function readAppVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || '0';
+  } catch { return '0'; }
+}
+function computeAssetVersion() {
+  const h = crypto.createHash('sha256');
+  let names = [];
+  try { names = fs.readdirSync(ASSETS_DIR).sort(); } catch { /* 目录不存在时用空 hash */ }
+  for (const n of names) {
+    try {
+      const f = path.join(ASSETS_DIR, n);
+      if (!fs.statSync(f).isFile()) continue;
+      h.update(n);                       // 文件名变化（新增/删除资源）也要让版本变
+      h.update(fs.readFileSync(f));      // 内容变化也要让版本变
+    } catch { /* 单个文件读失败不影响启动 */ }
+  }
+  return readAppVersion() + '-' + h.digest('hex').slice(0, 10);
+}
+const ASSET_V = computeAssetVersion();
+
+// 只接受 /xxx.html 与 /，避免目录穿越；其它路径交给 express.static / api 处理
+const HTML_NAME_RE = /^\/([A-Za-z0-9_-]+)\.html$/;
+function htmlNameFor(reqPath) {
+  if (reqPath === '/') return 'index.html';
+  const m = HTML_NAME_RE.exec(reqPath);
+  return m ? m[1] + '.html' : null;
+}
+
+// HTML：替换占位符 + 强制协商缓存（自己算 ETag，不依赖被关闭的 app etag）
+app.use(mount, (req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  const name = htmlNameFor(req.path);
+  if (!name) return next();
+  let html;
+  try { html = fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8'); }
+  catch { return next(); }
+  html = html.replace(/__ASSET_V__/g, ASSET_V);
+  const etag = '"' + crypto.createHash('sha1').update(html).digest('base64').slice(0, 16) + '"';
+  res.set('Cache-Control', 'no-cache, must-revalidate');
+  res.set('ETag', etag);
+  res.type('html');
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  return res.send(html);
+});
+
+// 静态资源：带 ?v= 的版本化 URL 可以放心长缓存；不带版本号的旧 URL 只做协商缓存
+app.use(mount, express.static(PUBLIC_DIR, {
+  setHeaders(res, filePath) {
+    const rel = path.relative(PUBLIC_DIR, filePath).replace(/\\/g, '/');
+    const url = (res.req && res.req.originalUrl) || '';
+    if (rel.startsWith('assets/')) {
+      res.setHeader('Cache-Control', /[?&]v=/.test(url)
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache');
+    } else if (rel.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  },
+}));
 app.use(mount, api);
 
 app.listen(PORT, () => {

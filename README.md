@@ -61,6 +61,18 @@
 - 分页源目录页只缓存「非末两页」（`page < totalPages - 1`），即使源站误报总页数也不会把真实末页冻住；`/api/book` 在末页抓到空页时向前回退最多 2 页找真正有内容的末页。
 - 判断缓存是否生效：响应头 `X-Cache: HIT / MISS`（章节目录页）、`X-Meta-Cache: HIT / MISS`（书籍元数据，指纹变化时显示 MISS）、`X-Cache-Remaining`（服务端缓存剩余秒数）。
 
+### 前端资源版本化（发版后不用硬刷新）
+
+无构建步骤的静态站点最容易踩的坑是 **HTML 被缓存**：旧 HTML 里根本没有新脚本的 `<script>` 引用，用户怎么刷新都看不到新功能。这里用「HTML 协商缓存 + 静态资源版本号」解决：
+
+- `server.js` 启动时计算 `ASSET_V = package.json 的 version + public/assets/ 下所有文件的内容 hash`（如 `1.1.0-3ecda7d3cb`），HTML 里的 `?v=__ASSET_V__` 占位符由中间件在响应时替换。
+- **HTML**：`Cache-Control: no-cache, must-revalidate` + 基于替换后内容算的 ETag（支持 304）。保证每次都能拿到最新页面，文件只有几 KB。
+- **JS/CSS**：带 `?v=` 的版本化 URL 用 `public, max-age=31536000, immutable` 长缓存；不带版本号的旧 URL 用 `no-cache`。URL 变了浏览器就视为新资源，不会命中旧缓存。
+- **升级版本号**：发版时改 `package.json` 的 `version` 并重启服务即可强制全站重新拉取静态资源。即使忘了升版本号，只要 `assets/` 里任一文件内容变化（或新增/删除文件），hash 也会自动变，同样能自动 bust。
+- **不影响 API**：中间件只处理 `/xxx.html` 与 `/`，`express.static` 的 `setHeaders` 只作用于 `assets/`；`/api/book/*` 等实时接口的 `no-store` 策略完全不变。相对路径引用（`assets/xxx?v=...`）天然兼容 `BASE_PATH` 子路径部署。
+
+> 边界：这保证的是「用户下次普通刷新 / 导航时看到新版本」，不会让已经打开的标签页热更新（那需要 Service Worker 或轮询版本接口）。
+
 ### 前端长列表与并发
 
 - 千章级目录用 `content-visibility: auto`（屏外条目跳过渲染）+ 超过 400 条时分批插入，快速切换排序/翻页有代际保护。

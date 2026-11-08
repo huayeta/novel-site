@@ -1,6 +1,6 @@
-# 青简 · 小说阅读站（数据源 m.keca.cc）
+# 青简 · 小说阅读站（多数据源）
 
-一个基于 Node + Express + 原生前端的移动端小说阅读网站示例。数据抓取自多个笔趣阁类移动站点（`m.keca.cc` 默认源、`m.mu8net.cc` 等），不落库；后端对列表 / 搜索 / 章节正文 / 封面做带 TTL 的内存缓存，**书籍详情与章节目录采用「目录实时 + 静态元数据指纹缓存 + 末页实时」**：目录、最新章节、总章数、目录末页始终实时回源，静态元数据按目录指纹缓存，一旦出新章立即回源刷新状态 / 更新时间（保证书架「更新」提醒与章节目录 0 延迟）。数据源列表见 `lib/sources/`，可用 `SOURCES` 环境变量调整顺序/启停。
+一个基于 Node + Express + 原生前端的移动端小说阅读网站示例。数据抓取自多个小说站点（`m.keca.cc` 默认源、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com` 等），不落库；后端对列表 / 搜索 / 章节正文 / 封面做带 TTL 的内存缓存，**书籍详情与章节目录采用「目录实时 + 静态元数据指纹缓存 + 末页实时」**：目录、最新章节、总章数、目录末页始终实时回源，静态元数据按目录指纹缓存，一旦出新章立即回源刷新状态 / 更新时间（保证书架「更新」提醒与章节目录 0 延迟）。数据源列表见 `lib/sources/`，可用 `SOURCES` 环境变量调整顺序/启停。
 
 ## 功能
 
@@ -78,13 +78,15 @@
 | 首页、分类、排行、全本列表 | 10 分钟 | 10 分钟 |
 | 搜索结果 | 5 分钟 | 5 分钟 |
 | 搜索本地索引（keca） | 5 分钟（构建失败 1 分钟内不重试） | — |
-| 章节正文 | 24 小时 | 24 小时 |
+| 章节正文 | 24 小时 | 24 小时（`CHAPTER_CACHE_V` 前缀） |
 | 封面图片 | 24 小时 | 24 小时 |
 | 书籍静态元数据（书名/作者/封面/分类/简介/状态/更新时间） | 24 小时，**目录指纹校验** | `no-store` |
 | 章节目录「非末页」 | 24 小时 | `no-store` |
 | **章节目录「末页」 + 目录 + 最新章节 + 章节总数 + 分页信息** | **不缓存（实时）** | **`no-store`** |
 
 **为什么书架 / book 页的更新不受影响**：小说章节是「追加式」的，新章只加在末尾。
+
+章节正文的 localStorage 缓存 key 带 `CHAPTER_CACHE_V` 版本前缀：当正文解析规则变化（例如过滤掉源站在章节末尾追加的推广段）时递增该常量，旧缓存自然失效，用户无需手动清 localStorage。各源 `getChapter()` 都会过滤站点推广文案（「最新网址」「手机站全新改版」「给个好评」等），只返回小说正文段落。
 
 - `/api/book/*` 每次**实时回源**取目录、`pager.totalPages`、最新章节与真实总章数 `totalChapters`（分页源也不再用「第 1 页 20 章」冒充总数）。只有静态元数据进缓存，且带**目录指纹**（最新 cid + 章节数 + 总页数）：
   - 目录没变 → 直接复用缓存，零额外请求；
@@ -139,7 +141,7 @@ npm start            # 或 npm run dev（--watch 热重载）
 # 打开 http://localhost:3100（端口用 PORT 环境变量可改）
 ```
 
-> 运行环境需要能访问外网 `m.keca.cc`（代理抓取源站内容）。
+> 运行环境需要能访问外网各数据源域名（如 `m.keca.cc`、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com`），服务端代理抓取源站内容。
 
 ## 挂到子路径下（BASE_PATH）
 
@@ -184,7 +186,7 @@ BASE_PATH=/xiaoshuo npm start
 ```
 novel-site/
 ├── server.js            # Express 服务：路由 + 静态托管 + 封面代理
-├── lib/source.js        # 数据源封装：抓取、解析、缓存、搜索本地索引
+├── lib/sources/        # 各数据源模块 + 注册表 index.js + 公共抓取器 _common.js
 ├── public/              # 前端（原生）
 │   ├── index.html       # 首页
 │   ├── book.html        # 书籍详情
@@ -198,13 +200,28 @@ novel-site/
 
 ## 数据来源说明
 
-- 章节列表来自源站 JSON 接口 `/api/list`，章节正文来自 `/api/content`（均无需反爬参数）。
-- 首页 / 书籍详情 / 分类 / 排行 / 全本 通过抓取 HTML 并解析。
-- 源站搜索接口已失效（返回空），故本站搜索改为**本地索引**：启动时预热、索引 5 分钟内复用，覆盖首页、各分类、各排行榜、全本等列表页收录的书籍。搜索范围限于已收录书籍，并非全站。
+已接入 10 个数据源（`SOURCES` 环境变量可调整顺序/启停，第一个即默认源；页面也可用 `?src=<id>` 临时切换）：
+
+| id | 站点 | 编码 | 目录 | 搜索 |
+| --- | --- | --- | --- | --- |
+| `keca` | `m.keca.cc`（默认） | UTF-8 | JSON 接口 `/api/list` 全量 | 本地索引（抓取列表页建索引，5 分钟 TTL） |
+| `ibq` | `www.ibiquw.org` | UTF-8 | 书籍页全量 | 站内 `search.php?searchkey=` |
+| `mu8` | `m.mu8net.cc` | **GBK** | **分页**（74 页，末页实时） | 站内搜索 |
+| `d95` | `www.95dushu.info` | UTF-8 | 目录页全量（如 3014 章一次返回） | 站内 `search.php?searchkey=`，100 条/页、无限流 |
+| `bf` | `www.bingfengxs.com`（站名「爱奇电子书」） | UTF-8 | 目录页全量（`reader.php?aid=` 的 302 目标 `/<dir>/<id>/`） | 站内 `search.php?searchkey=`，`.list_l` 卡片 50 条/页 |
+| `xq` | `www.xianqihaotianmi.org`（站名「言情小说阁」） | UTF-8 | **书籍页内全量**（`/book/<id>.html` 即含 197 章） | 站内 `search.php?searchkey=`，表格 100 条/页 |
+| `ibqg` | `www.ibiqugu.net`（站名「香书小说」） | UTF-8 | 书籍页 `/<dir>/<id>/` 内 `#list` 全量 | **POST** `/modules/article/waps.php`（`searchkey=`），表格 50 条/页 |
+| `xb` | `www.xbiquwk.com`（站名「笔尖中文」） | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）内 `#list` 全量 | `search.php?searchkey=`，表格 50 条/页 |
+| `aiku` | `www.aikushuge.com`（站名「大帝小说库」） | UTF-8 | `/files/article/html/<dir>/<id>/index.html` 全量 | `/search/?searchkey=`，表格 100 条/页 |
+| `biqusa` | `www.biqusa.com`（站名「爱曲小说」） | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）全量 | `GET /search.html?name=`，`.novelslist2` 列表（注意：非 `searchkey`） |
+
+各源的章节正文、封面均通过 HTML 解析 / 后端代理获取；`d95` 正文用 `#content` 按 `<br>` 分段，无分页。新增源只需在 `lib/sources/` 下新增一个符合契约的默认导出模块（`getHome/getBook/getChapters/getChapter/getCategory/getRank/getQuanben/categoryList/rankList/search/warmIndex`），并在 `lib/sources/index.js` 注册。
+
+**实时性约束**：所有源的 `/api/book/*` 与 `/api/chapters/*` 对浏览器一律 `no-store`；目录、最新章节、总章数始终实时回源，只有静态元数据按目录指纹缓存。`keca` 的本地索引搜索有约 5–10 分钟可见延迟，其余源为实时站内搜索。`bf` 的正文容器为 `.yd_text2`（`<br>` 分段），目录需经 `reader.php?aid=<id>` 跳转后的 `/<dir>/<id>/` 获取。`xq` 的 `getBook()` 与 `getChapters()` 共用同一个 `/book/<id>.html`（模块内 60 秒短缓存避免重复回源），正文容器为 `.content-body`。`ibqg` 同样共用一个书籍页（60 秒短缓存），搜索必须用 **POST** `waps.php`（GET 与 `search.php` 均已废弃），按需求不建本地索引、不使用书库页。`xb` 的书链是下划线格式 `/<dir>_<id>/`、章节链接为相对 `<cid>.html`，搜索参数为 `searchkey`（`q`/`s` 无效）。`aiku` 已接入 `ddxsku.com`（`search.php` POST）、`m.aikushuge.com`（手机版）等镜像，本文件优先用 `www.aikushuge.com`（全量目录在 `/files/article/html/`），正文容器是 `#contents`。`biqusa` 的书链同为下划线 `/<dir>_<id>/`（`dir = floor(id/1000)`），章节链接 `/<dir>_<id>/<cid>.html`；搜索参数**必须是 `name`**（`searchkey`/`q` 无效）；书籍页元信息走 `og:` 标签（`og:title`/`og:novel:author`/`og:description` 简介/`og:image` 封面），正文容器为标准 `#content`（`搜索首段为站点广告「天才一秒记住本站地址…」需过滤`，`<br>` 分段，无分页）；`status` 无显式字段，由目录末章标题推导（含「完本/大结局/结卷」等视为完本，否则连载中）。
 
 ## ⚠️ 版权与合规声明（务必阅读）
 
-`m.keca.cc`、`m.mu8net.cc` 等所接入的站点均为**未经授权的盗版小说站点（笔趣阁类）**，内容通常未获版权方许可。本项目仅作为**个人学习、技术演示与爬虫/前端实践**用途：
+`m.keca.cc`、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com` 等所接入的站点均为**未经授权的盗版小说站点**，内容通常未获版权方许可。本项目仅作为**个人学习、技术演示与爬虫/前端实践**用途：
 
 - **请勿**将本站点公开部署、对外提供服务或用于任何商业目的。
 - 请尊重原作者与正版平台，支持正版阅读。

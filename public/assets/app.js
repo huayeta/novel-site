@@ -900,8 +900,11 @@ function getBookData(src, id) {
 // ============ 章节内容缓存 + 预加载 ============
 // 章节正文发布后不再变化，可安全缓存：localStorage TTL 24h + LRU 250。
 // 后端 /api/chapter/* 另有 24h 服务端缓存；空正文不写入（源站异常时下次仍会重试）。
-function ccGet(k) { return chCache.get(k); }
-function ccSet(k, v) { if (v && v.paragraphs && v.paragraphs.length) chCache.set(k, v); }
+// 解析规则变化（如过滤掉源站正文末尾的推广段）时递增 CHAPTER_CACHE_V，
+// 旧缓存 key 随之失效，用户无需手动清 localStorage。
+const CHAPTER_CACHE_V = 2;
+function ccGet(k) { return chCache.get(CHAPTER_CACHE_V + '|' + k); }
+function ccSet(k, v) { if (v && v.paragraphs && v.paragraphs.length) chCache.set(CHAPTER_CACHE_V + '|' + k, v); }
 async function fetchChapter(src, bid, cid) {
   const k = src + '/' + bid + '/' + cid;
   const hit = ccGet(k);

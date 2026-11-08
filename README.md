@@ -2,7 +2,7 @@
 
 > ⚠️ **仅限私有部署，请勿公开分享 / 公开 fork / 公开镜像**。本项目聚合的全部数据源均为未授权盗版小说站点（详见文末《版权与合规声明》）。仓库默认应为 **Private**；只用于个人学习、技术演示与爬虫/前端实践，不要部署到公网或对外传播。
 
-一个基于 Node + Express + 原生前端的移动端小说阅读网站示例。数据抓取自多个小说站点（`m.keca.cc` 默认源、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com` 等），不落库；后端对列表 / 搜索 / 章节正文 / 封面做带 TTL 的内存缓存，**书籍详情与章节目录采用「目录实时 + 静态元数据指纹缓存 + 末页实时」**：目录、最新章节、总章数、目录末页始终实时回源，静态元数据按目录指纹缓存，一旦出新章立即回源刷新状态 / 更新时间（保证书架「更新」提醒与章节目录 0 延迟）。数据源列表见 `lib/sources/`，可用 `SOURCES` 环境变量调整顺序/启停。
+一个基于 Node + Express + 原生前端的移动端小说阅读网站示例。数据抓取自多个小说站点（`笔趣阁移动站` 默认源、`九五小说网`、`爱奇电子书`、`言情小说阁`、`香书小说`、`笔尖中文`、`大帝小说库`、`必去小说网`、`木偶小说（笔趣阁）`、`爱曲小说` 等），不落库；后端对列表 / 搜索 / 章节正文 / 封面做带 TTL 的内存缓存，**书籍详情与章节目录采用「目录实时 + 静态元数据指纹缓存 + 末页实时」**：目录、最新章节、总章数、目录末页始终实时回源，静态元数据按目录指纹缓存，一旦出新章立即回源刷新状态 / 更新时间（保证书架「更新」提醒与章节目录 0 延迟）。数据源列表见 `lib/sources/`，可用 `SOURCES` 环境变量调整顺序/启停。
 
 ## 功能
 
@@ -143,7 +143,7 @@ npm start            # 或 npm run dev（--watch 热重载）
 # 打开 http://localhost:3100（端口用 PORT 环境变量可改）
 ```
 
-> 运行环境需要能访问外网各数据源域名（如 `m.keca.cc`、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com`），服务端代理抓取源站内容。
+> 运行环境需要能访问外网各数据源站点（如 `笔趣阁移动站`、`九五小说网`、`爱奇电子书`、`言情小说阁`、`香书小说`、`笔尖中文`、`大帝小说库`、`必去小说网`、`木偶小说（笔趣阁）`、`爱曲小说`），服务端代理抓取源站内容。
 
 ## 挂到子路径下（BASE_PATH）
 
@@ -206,24 +206,24 @@ novel-site/
 
 | id | 站点 | 编码 | 目录 | 搜索 |
 | --- | --- | --- | --- | --- |
-| `keca` | `m.keca.cc`（默认） | UTF-8 | JSON 接口 `/api/list` 全量 | 本地索引（抓取列表页建索引，5 分钟 TTL） |
-| `ibq` | `www.ibiquw.org` | UTF-8 | 书籍页全量 | 站内 `search.php?searchkey=` |
-| `mu8` | `m.mu8net.cc` | **GBK** | **分页**（74 页，末页实时） | 站内搜索 |
-| `d95` | `www.95dushu.info` | UTF-8 | 目录页全量（如 3014 章一次返回） | 站内 `search.php?searchkey=`，100 条/页、无限流 |
-| `bf` | `www.bingfengxs.com`（站名「爱奇电子书」） | UTF-8 | 目录页全量（`reader.php?aid=` 的 302 目标 `/<dir>/<id>/`） | 站内 `search.php?searchkey=`，`.list_l` 卡片 50 条/页 |
-| `xq` | `www.xianqihaotianmi.org`（站名「言情小说阁」） | UTF-8 | **书籍页内全量**（`/book/<id>.html` 即含 197 章） | 站内 `search.php?searchkey=`，表格 100 条/页 |
-| `ibqg` | `www.ibiqugu.net`（站名「香书小说」） | UTF-8 | 书籍页 `/<dir>/<id>/` 内 `#list` 全量 | **POST** `/modules/article/waps.php`（`searchkey=`），表格 50 条/页 |
-| `xb` | `www.xbiquwk.com`（站名「笔尖中文」） | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）内 `#list` 全量 | `search.php?searchkey=`，表格 50 条/页 |
-| `aiku` | `www.aikushuge.com`（站名「大帝小说库」） | UTF-8 | `/files/article/html/<dir>/<id>/index.html` 全量 | `/search/?searchkey=`，表格 100 条/页 |
-| `biqusa` | `www.biqusa.com`（站名「爱曲小说」） | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）全量 | `GET /search.html?name=`，`.novelslist2` 列表（注意：非 `searchkey`） |
+| `keca` | `笔趣阁移动站`（默认） | UTF-8 | JSON 接口 `/api/list` 全量 | 本地索引（抓取列表页建索引，5 分钟 TTL） |
+| `ibq` | `必去小说网` | UTF-8 | 书籍页全量 | 站内 `search.php?searchkey=` |
+| `mu8` | `木偶小说（笔趣阁）` | **GBK** | **分页**（74 页，末页实时） | 站内搜索 |
+| `d95` | `九五小说网` | UTF-8 | 目录页全量（如 3014 章一次返回） | 站内 `search.php?searchkey=`，100 条/页、无限流 |
+| `bf` | `爱奇电子书` | UTF-8 | 目录页全量（`reader.php?aid=` 的 302 目标 `/<dir>/<id>/`） | 站内 `search.php?searchkey=`，`.list_l` 卡片 50 条/页 |
+| `xq` | `言情小说阁` | UTF-8 | **书籍页内全量**（`/book/<id>.html` 即含 197 章） | 站内 `search.php?searchkey=`，表格 100 条/页 |
+| `ibqg` | `香书小说` | UTF-8 | 书籍页 `/<dir>/<id>/` 内 `#list` 全量 | **POST** `/modules/article/waps.php`（`searchkey=`），表格 50 条/页 |
+| `xb` | `笔尖中文` | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）内 `#list` 全量 | `search.php?searchkey=`，表格 50 条/页 |
+| `aiku` | `大帝小说库` | UTF-8 | `/files/article/html/<dir>/<id>/index.html` 全量 | `/search/?searchkey=`，表格 100 条/页 |
+| `biqusa` | `爱曲小说` | UTF-8 | 书籍页 `/<dir>_<id>/`（下划线）全量 | `GET /search.html?name=`，`.novelslist2` 列表（注意：非 `searchkey`） |
 
 各源的章节正文、封面均通过 HTML 解析 / 后端代理获取；`d95` 正文用 `#content` 按 `<br>` 分段，无分页。新增源只需在 `lib/sources/` 下新增一个符合契约的默认导出模块（`getHome/getBook/getChapters/getChapter/getCategory/getRank/getQuanben/categoryList/rankList/search/warmIndex`），并在 `lib/sources/index.js` 注册。
 
-**实时性约束**：所有源的 `/api/book/*` 与 `/api/chapters/*` 对浏览器一律 `no-store`；目录、最新章节、总章数始终实时回源，只有静态元数据按目录指纹缓存。`keca` 的本地索引搜索有约 5–10 分钟可见延迟，其余源为实时站内搜索。`bf` 的正文容器为 `.yd_text2`（`<br>` 分段），目录需经 `reader.php?aid=<id>` 跳转后的 `/<dir>/<id>/` 获取。`xq` 的 `getBook()` 与 `getChapters()` 共用同一个 `/book/<id>.html`（模块内 60 秒短缓存避免重复回源），正文容器为 `.content-body`。`ibqg` 同样共用一个书籍页（60 秒短缓存），搜索必须用 **POST** `waps.php`（GET 与 `search.php` 均已废弃），按需求不建本地索引、不使用书库页。`xb` 的书链是下划线格式 `/<dir>_<id>/`、章节链接为相对 `<cid>.html`，搜索参数为 `searchkey`（`q`/`s` 无效）。`aiku` 已接入 `ddxsku.com`（`search.php` POST）、`m.aikushuge.com`（手机版）等镜像，本文件优先用 `www.aikushuge.com`（全量目录在 `/files/article/html/`），正文容器是 `#contents`。`biqusa` 的书链同为下划线 `/<dir>_<id>/`（`dir = floor(id/1000)`），章节链接 `/<dir>_<id>/<cid>.html`；搜索参数**必须是 `name`**（`searchkey`/`q` 无效）；书籍页元信息走 `og:` 标签（`og:title`/`og:novel:author`/`og:description` 简介/`og:image` 封面），正文容器为标准 `#content`（`搜索首段为站点广告「天才一秒记住本站地址…」需过滤`，`<br>` 分段，无分页）；`status` 无显式字段，由目录末章标题推导（含「完本/大结局/结卷」等视为完本，否则连载中）。
+**实时性约束**：所有源的 `/api/book/*` 与 `/api/chapters/*` 对浏览器一律 `no-store`；目录、最新章节、总章数始终实时回源，只有静态元数据按目录指纹缓存。`keca` 的本地索引搜索有约 5–10 分钟可见延迟，其余源为实时站内搜索。`bf` 的正文容器为 `.yd_text2`（`<br>` 分段），目录需经 `reader.php?aid=<id>` 跳转后的 `/<dir>/<id>/` 获取。`xq` 的 `getBook()` 与 `getChapters()` 共用同一个 `/book/<id>.html`（模块内 60 秒短缓存避免重复回源），正文容器为 `.content-body`。`ibqg` 同样共用一个书籍页（60 秒短缓存），搜索必须用 **POST** `waps.php`（GET 与 `search.php` 均已废弃），按需求不建本地索引、不使用书库页。`xb` 的书链是下划线格式 `/<dir>_<id>/`、章节链接为相对 `<cid>.html`，搜索参数为 `searchkey`（`q`/`s` 无效）。`aiku` 已接入 `大帝小说库镜像站`（`search.php` POST）、`大帝小说库手机版`（手机版）等镜像，本文件优先用 `大帝小说库`（全量目录在 `/files/article/html/`），正文容器是 `#contents`。`biqusa` 的书链同为下划线 `/<dir>_<id>/`（`dir = floor(id/1000)`），章节链接 `/<dir>_<id>/<cid>.html`；搜索参数**必须是 `name`**（`searchkey`/`q` 无效）；书籍页元信息走 `og:` 标签（`og:title`/`og:novel:author`/`og:description` 简介/`og:image` 封面），正文容器为标准 `#content`（`搜索首段为站点广告「天才一秒记住本站地址…」需过滤`，`<br>` 分段，无分页）；`status` 无显式字段，由目录末章标题推导（含「完本/大结局/结卷」等视为完本，否则连载中）。
 
 ## ⚠️ 版权与合规声明（务必阅读）
 
-`m.keca.cc`、`www.95dushu.info`、`www.bingfengxs.com`、`www.xianqihaotianmi.org`、`www.ibiqugu.net`、`www.xbiquwk.com`、`www.aikushuge.com`、`www.ibiquw.org`、`m.mu8net.cc`、`www.biqusa.com` 等所接入的站点均为**未经授权的盗版小说站点**，内容通常未获版权方许可。本项目仅作为**个人学习、技术演示与爬虫/前端实践**用途：
+`笔趣阁移动站`、`九五小说网`、`爱奇电子书`、`言情小说阁`、`香书小说`、`笔尖中文`、`大帝小说库`、`必去小说网`、`木偶小说（笔趣阁）`、`爱曲小说` 等所接入的站点均为**未经授权的盗版小说站点**，内容通常未获版权方许可。本项目仅作为**个人学习、技术演示与爬虫/前端实践**用途：
 
 - **请勿**将本站点公开部署、对外提供服务或用于任何商业目的。
 - 请尊重原作者与正版平台，支持正版阅读。

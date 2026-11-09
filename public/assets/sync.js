@@ -5,8 +5,10 @@
 // 接口用相对路径 api/sync/...，天然跟随 BASE_PATH 子路径。
 //
 // 用法（由 shelfPage 调用）：
-//   QJSync.mount({ onSynced: () => renderShelf({ keepOld: true }) });
+//   QJSync.mount({ onSynced: (info) => { if (!info || info.changed !== false) renderShelf({ keepOld: true }); } });
 //   QJSync.syncNow({ timeout: 5000, onSynced: false });
+// onSynced 收到 { changed }：changed=false 表示本次同步没带来任何远端变更，
+// 调用方据此跳过无意义的整表重渲染（否则书架会连发两轮 /api/book）。
 //
 // 数据格式 = 本地统一状态对象 qingjian_userdata，服务端不解析内容，零格式转换。
 (function (global) {
@@ -65,6 +67,14 @@
   }
 
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  // 判断合并结果相对本地是否「实质有变化」。
+  // mergeState 每次都会把 updatedAt 刷成 Date.now()，必须排除它再比，
+  // 否则每次同步都会被误判成有变化。
+  function stateSignature(s) {
+    var c = clone(s || {});
+    delete c.updatedAt;
+    return JSON.stringify(c);
+  }
   function nowStr() {
     var d = new Date();
     return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
@@ -131,7 +141,7 @@
   // ---------- 网络 ----------
   function url(code) { return 'api/sync/' + encodeURIComponent(code); }
 
-  async function doSync(code, signal, attempt, onSynced) {
+  async function doSync(code, signal, attempt, onSynced, changedAcc) {
     var local = clone(global.loadState());
     var r = await fetch(url(code), { signal: signal });
     var remote = null, rev = 0;
@@ -145,6 +155,9 @@
     }
 
     var merged = mergeState(local, remote);
+    // 只有远端确实带来了本地没有的内容才算「有变化」；409 重试时沿递归累积，
+    // 避免某次重试因本地已被写回而把早先的变化判丢。
+    var changed = !!changedAcc || stateSignature(merged) !== stateSignature(local);
     applyLocal(merged); // 合并而非覆盖：另一台设备上已有的本地数据不会丢
 
     var p = await fetch(url(code), {
@@ -158,7 +171,7 @@
       if (attempt >= 3) throw new Error('conflict');
       var c = await p.json();
       applyLocal(mergeState(clone(global.loadState()), c.data));
-      return doSync(code, signal, attempt + 1, onSynced);
+      return doSync(code, signal, attempt + 1, onSynced, changed);
     }
     if (!p.ok) throw new Error('PUT ' + p.status);
     var pr = await p.json();
@@ -166,7 +179,7 @@
       localStorage.setItem(REV_KEY, String(pr.rev));
       localStorage.setItem(TIME_KEY, String(Date.now()));
     } catch (e) {}
-    if (onSynced) { try { onSynced(); } catch (e) {} }
+    if (onSynced) { try { onSynced({ changed: changed }); } catch (e) {} }
     return { ok: true, rev: pr.rev };
   }
 

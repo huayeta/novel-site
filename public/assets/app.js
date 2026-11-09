@@ -331,34 +331,65 @@ function timeAgo(ts) {
   return Math.floor(mon / 12) + '年前';
 }
 
-// 书籍元数据：前端缓存已关闭，每次都重新获取，保证最新
-async function getBookMeta(id, src) {
-  src = src || DEFAULT_SRC;
-  try {
-    const data = await getBookData(src, id);
-    const book = data.book || {};
-    const chapters = data.chapters || [];
-    const l = book.latest || {};
-    return {
-      // 分页源 /api/book 只带第 1 页目录，必须用服务端算出的真实总章数
-      total: Number(data.totalChapters) || chapters.length,
-      cids: chapters.map((c) => c.cid),
-      firstCid: chapters.length ? chapters[0].cid : '',
-      latestCid: l.cid || '',
-      latestName: l.name || '',
-      paginated: !!(data.pager && data.pager.paginated),
-      totalPages: data.pager ? data.pager.totalPages : 0,
-      pageSize: data.pager ? data.pager.pageSize : 0,
-      status: book.status || '',
-      update: book.update || '',
-      title: book.title || '',
-      author: book.author || '',
-      cover: book.cover || '',
-    };
-  } catch (e) {
-    // 明确区分「获取失败」，不要伪装成「未开始/无更新」
-    return { error: true };
+// 书籍元数据：短 TTL + in-flight 合并。
+// 书架页会因「初始化 + 云同步回调」在极短时间内渲染两次；原先每次都回源，
+// 导致每本书的 /api/book 发两次（服务端目录部分不缓存，等于源站被抓两次）。
+// 按 src:id 合并并发请求并缓存 30 秒；下拉刷新传 force 强制实时。
+const BOOK_META_TTL = 30 * 1000;
+const bookMetaCache = new Map(); // key -> { at, value?, promise? }
+function pruneBookMetaCache() {
+  const now = Date.now();
+  for (const [k, v] of bookMetaCache) {
+    if (v.value && now - v.at > BOOK_META_TTL) bookMetaCache.delete(k);
   }
+}
+async function getBookMeta(id, src, opts) {
+  src = src || DEFAULT_SRC;
+  const force = !!(opts && opts.force);
+  const key = entityKey(src, id);
+  if (!force) {
+    const hit = bookMetaCache.get(key);
+    if (hit) {
+      if (hit.value) {
+        if (Date.now() - hit.at < BOOK_META_TTL) return hit.value;
+      } else if (hit.promise) {
+        return hit.promise; // 首次请求还没回来：复用同一个 Promise，不重复发请求
+      }
+    }
+  }
+  const task = (async () => {
+    try {
+      const data = await getBookData(src, id);
+      const book = data.book || {};
+      const chapters = data.chapters || [];
+      const l = book.latest || {};
+      const value = {
+        // 分页源 /api/book 只带第 1 页目录，必须用服务端算出的真实总章数
+        total: Number(data.totalChapters) || chapters.length,
+        cids: chapters.map((c) => c.cid),
+        firstCid: chapters.length ? chapters[0].cid : '',
+        latestCid: l.cid || '',
+        latestName: l.name || '',
+        paginated: !!(data.pager && data.pager.paginated),
+        totalPages: data.pager ? data.pager.totalPages : 0,
+        pageSize: data.pager ? data.pager.pageSize : 0,
+        status: book.status || '',
+        update: book.update || '',
+        title: book.title || '',
+        author: book.author || '',
+        cover: book.cover || '',
+      };
+      bookMetaCache.set(key, { at: Date.now(), value });
+      return value;
+    } catch (e) {
+      // 明确区分「获取失败」，不要伪装成「未开始/无更新」；失败不缓存，下次仍会重试
+      bookMetaCache.delete(key);
+      return { error: true };
+    }
+  })();
+  bookMetaCache.set(key, { at: Date.now(), promise: task });
+  if (bookMetaCache.size > 200) pruneBookMetaCache();
+  return task;
 }
 
 // ============ 新章「已读基线」（统一状态对象）============
@@ -1354,7 +1385,7 @@ async function renderShelf(opts = {}) {
   // L5：骨架态还没有 meta，先不渲染 ⋮ 菜单，避免「继续」落到错误链接。
   // 下拉刷新传 keepOld：保留现有行直到实时数据回来，避免刷新时整页闪一下骨架。
   if (!opts.keepOld) box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id), true)).join('');
-  const metas = await mapLimit(list, 4, (b) => getBookMeta(b.id, b.src || curSrc));
+  const metas = await mapLimit(list, 4, (b) => getBookMeta(b.id, b.src || curSrc, { force: !!opts.force }));
   if (!isFresh()) return;
   // 冷启动：为没有基线的书建立起点（本次不亮），之后只在点进书时刷新基线。
   // 必须在渲染前执行，且只在基线为空时写入，绝不覆盖已有基线。
@@ -1390,12 +1421,18 @@ async function shelfPage() {
   if (tabs) tabs.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
   renderShelf().catch(() => {});
-  // 云同步（同步码）：同步成功后重渲染书架，让「更新」徽标 / 进度立刻反映远端数据
+  // 云同步（同步码）：仅当同步确实带来远端变更时才重渲染书架。
+  // 无变化的同步（绝大多数）不重渲染，避免紧挨着初始化再来一轮全量 /api/book；
+  // 即使真有变更，getBookMeta 的短 TTL / in-flight 合并也会挡住重复回源。
   if (globalThis.QJSync) {
-    QJSync.mount({ onSynced: () => renderShelf({ keepOld: true }) });
+    QJSync.mount({ onSynced: (info) => {
+      if (info && info.changed === false) return;
+      renderShelf({ keepOld: true });
+    } });
   }
   // 下拉刷新（公共模块）：先同步再重渲染，顺带把另一台设备的改动拉过来。
   // 同步失败静默降级，不能让转圈卡住；onSynced:false 避免重复触发一次渲染。
+  // force:true 绕过元数据短缓存，保证用户主动刷新时拿到实时数据。
   if (globalThis.PullToRefresh) {
     PullToRefresh.mount({
       content: document.querySelector('.wrap'),
@@ -1403,7 +1440,7 @@ async function shelfPage() {
       canRefresh: () => !!paneShelf && !paneShelf.hidden,
       onRefresh: async () => {
         if (globalThis.QJSync) await QJSync.syncNow({ timeout: 5000, onSynced: false }).catch(() => {});
-        await renderShelf({ keepOld: true });
+        await renderShelf({ keepOld: true, force: true });
       },
     });
   }

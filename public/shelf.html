@@ -20,12 +20,20 @@
   <div class="wrap">
     <div class="tabs" id="shelfTabs">
       <button class="tab on" data-tab="shelf" type="button">书架</button>
+      <button class="tab" data-tab="cand" type="button">备选</button>
       <button class="tab" data-tab="history" type="button">历史</button>
     </div>
 
     <div id="shelfPane">
       <div class="section-title">我的书架 <span class="more" id="bmCount"></span></div>
+      <div id="shelfCheck" class="cand-tip" hidden></div>
       <div id="shelf"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div id="candPane" hidden>
+      <div class="section-title">备选 <span class="more" id="candCount"></span></div>
+      <div id="cands"><div class="empty">加载中…</div></div>
+      <p class="cand-tip">在书籍详情页点「☆ 备选」把想以后再看的小说暂存在这里；确定要看时点「加入书架」。</p>
     </div>
 
     <div id="historyPane" hidden>

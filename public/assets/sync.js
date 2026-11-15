@@ -117,6 +117,7 @@
       v: 2,
       updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0, Date.now()),
       books: mergeMap(local.books, remote.books),
+      candidates: mergeMap(local.candidates, remote.candidates),
       progress: mergeMap(local.progress, remote.progress),
       seen: mergeMap(local.seen, remote.seen),
       history: mergeHistory(local.history, remote.history),

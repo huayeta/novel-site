@@ -36,6 +36,16 @@ async function api(path) {
   return (await apiRaw(path)).json();
 }
 
+// id -> 源名映射：书架/备选/历史行内显示「来源」徽标用。
+// resolveDefaultSource 启动时填充；失败时退化为直接显示 src id。
+const SOURCE_NAME_MAP = {};
+function srcNameOf(src) {
+  return SOURCE_NAME_MAP[src || DEFAULT_SRC] || (src || DEFAULT_SRC);
+}
+function srcBadgeHtml(src) {
+  return `<span class="src-badge">${esc(srcNameOf(src))}</span>`;
+}
+
 // 页面分发前解析真实默认源，避免以 ibq/mu8 为默认源时首页空白、来源混用
 async function resolveDefaultSource() {
   try {
@@ -43,6 +53,7 @@ async function resolveDefaultSource() {
     if (Array.isArray(list) && list.length && list[0].id) {
       DEFAULT_SRC = list[0].id;
       if (!URL_SRC) curSrc = DEFAULT_SRC;
+      list.forEach((s) => { if (s && s.id) SOURCE_NAME_MAP[s.id] = s.name || s.id; });
     }
   } catch (e) { /* 失败时保留 'keca' 兜底 */ }
 }
@@ -69,6 +80,7 @@ function defaultState() {
     v: STATE_VERSION,
     updatedAt: 0,
     books: {},      // Map<"src:id", {src,id,title,author,cover,addedAt,ts,deleted}>
+    candidates: {}, // 备选清单 Map<"src:id", {src,id,title,author,cover,addedAt,ts,deleted}>
     progress: {},   // Map<"src:id", {cid,title,page?,ts}>
     seen: {},       // Map<"src:id", {cid,ts,deleted}>
     history: [],    // 数组，条目自带 ts，天然按时间归并
@@ -84,6 +96,8 @@ function loadState() {
   if (!s || typeof s !== 'object' || s.v !== STATE_VERSION) s = defaultState();
   // 防御性补齐，避免半写入 / 手工改坏导致白屏
   if (!s.books || typeof s.books !== 'object' || Array.isArray(s.books)) s.books = {};
+  // 老数据没有 candidates：防御性补齐，无需升版本号
+  if (!s.candidates || typeof s.candidates !== 'object' || Array.isArray(s.candidates)) s.candidates = {};
   if (!s.progress || typeof s.progress !== 'object' || Array.isArray(s.progress)) s.progress = {};
   if (!s.seen || typeof s.seen !== 'object' || Array.isArray(s.seen)) s.seen = {};
   if (!Array.isArray(s.history)) s.history = [];
@@ -297,6 +311,52 @@ function touchBookmark(src, id) {
   saveState();
 }
 
+// ============ 备选清单（「以后想看」的暂存区）============
+// 与书架同一套墓碑/合并模型：删除写 deleted:true，云同步按 ts 裁决。
+// 加入书架 = 书架 unshift + 备选墓碑，两端各走各的 mergeMap，互不干扰。
+function getCandidates() {
+  return Object.values(loadState().candidates)
+    .filter((b) => b && !b.deleted)
+    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
+    .map((b) => ({ src: b.src, id: b.id, title: b.title, author: b.author, cover: b.cover, addedAt: b.addedAt }));
+}
+function isCandidate(src, id) {
+  const b = loadState().candidates[entityKey(src || DEFAULT_SRC, id)];
+  return !!(b && !b.deleted);
+}
+function toggleCandidate(b) {
+  const src = b.src || DEFAULT_SRC;
+  const s = loadState();
+  const k = entityKey(src, b.id);
+  const now = Date.now();
+  const cur = s.candidates[k];
+  if (cur && !cur.deleted) {
+    cur.deleted = true; cur.ts = now; // 墓碑而非物理删除，同步时另一台设备才会跟着删
+    saveState();
+    return false; // false=已移出备选
+  }
+  s.candidates[k] = {
+    src, id: b.id, title: b.title || '', author: b.author || '', cover: b.cover || '',
+    addedAt: cur && !cur.deleted ? cur.addedAt : now,
+    ts: now, deleted: false,
+  };
+  saveState();
+  return true; // true=已加入备选
+}
+// 备选 → 书架：只增不删（不能用 toggleBookmark，已收藏的书会被反向移出）。
+// 已在书架时仅移出备选；书架用 unshift 语义保证新加入的排前面。
+function promoteCandidate(src, id) {
+  const c = loadState().candidates[entityKey(src || DEFAULT_SRC, id)];
+  if (!c || c.deleted) return;
+  const full = { src: c.src || src, id: c.id || id, title: c.title, author: c.author, cover: c.cover };
+  if (!isBookmarked(full.src, full.id)) {
+    const list = getBookmarks();
+    list.unshift(full);
+    saveBookmarks(list);
+  }
+  toggleCandidate(full);
+}
+
 // ============ 阅读历史（统一状态对象）============
 function getHistory() {
   return loadState().history.slice();
@@ -352,10 +412,30 @@ function timeAgo(ts) {
   return Math.floor(mon / 12) + '年前';
 }
 
-// 书籍元数据：短 TTL + in-flight 合并。
-// 书架页会因「初始化 + 云同步回调」在极短时间内渲染两次；原先每次都回源，
-// 导致每本书的 /api/book 发两次（服务端目录部分不缓存，等于源站被抓两次）。
-// 按 src:id 合并并发请求并缓存 30 秒；下拉刷新传 force 强制实时。
+// /api/book 响应 → 书架行所需元数据（纯函数，供 getBookMeta 与日缓存共用）
+function buildBookMeta(data) {
+  const book = data.book || {};
+  const chapters = data.chapters || [];
+  const l = book.latest || {};
+  return {
+    // 分页源 /api/book 只带第 1 页目录，必须用服务端算出的真实总章数
+    total: Number(data.totalChapters) || chapters.length,
+    cids: chapters.map((c) => c.cid),
+    firstCid: chapters.length ? chapters[0].cid : '',
+    latestCid: l.cid || '',
+    latestName: l.name || '',
+    paginated: !!(data.pager && data.pager.paginated),
+    totalPages: data.pager ? data.pager.totalPages : 0,
+    pageSize: data.pager ? data.pager.pageSize : 0,
+    status: book.status || '',
+    update: book.update || '',
+    title: book.title || '',
+    author: book.author || '',
+    cover: book.cover || '',
+  };
+}
+// 书籍元数据：短 TTL + in-flight 合并；成功后写「当日缓存」（含完整 payload，
+// 书架校验完，同日再进 book/read 页就 0 请求）。
 const BOOK_META_TTL = 30 * 1000;
 const bookMetaCache = new Map(); // key -> { at, value?, promise? }
 function pruneBookMetaCache() {
@@ -368,38 +448,18 @@ async function getBookMeta(id, src, opts) {
   src = src || DEFAULT_SRC;
   const force = !!(opts && opts.force);
   const key = entityKey(src, id);
-  if (!force) {
-    const hit = bookMetaCache.get(key);
-    if (hit) {
-      if (hit.value) {
-        if (Date.now() - hit.at < BOOK_META_TTL) return hit.value;
-      } else if (hit.promise) {
-        return hit.promise; // 首次请求还没回来：复用同一个 Promise，不重复发请求
-      }
-    }
+  // in-flight 合并对 force 也生效：并发渲染（初始化 + 同步回调）各自请求只会发一次。
+  // force 只跳过「已有结果」的短缓存，不跳过「正在进行」的请求——它本来就是实时的。
+  const hit = bookMetaCache.get(key);
+  if (hit && hit.promise) return hit.promise;
+  if (!force && hit && hit.value) {
+    if (Date.now() - hit.at < BOOK_META_TTL) return hit.value;
   }
   const task = (async () => {
     try {
       const data = await getBookData(src, id);
-      const book = data.book || {};
-      const chapters = data.chapters || [];
-      const l = book.latest || {};
-      const value = {
-        // 分页源 /api/book 只带第 1 页目录，必须用服务端算出的真实总章数
-        total: Number(data.totalChapters) || chapters.length,
-        cids: chapters.map((c) => c.cid),
-        firstCid: chapters.length ? chapters[0].cid : '',
-        latestCid: l.cid || '',
-        latestName: l.name || '',
-        paginated: !!(data.pager && data.pager.paginated),
-        totalPages: data.pager ? data.pager.totalPages : 0,
-        pageSize: data.pager ? data.pager.pageSize : 0,
-        status: book.status || '',
-        update: book.update || '',
-        title: book.title || '',
-        author: book.author || '',
-        cover: book.cover || '',
-      };
+      const value = buildBookMeta(data);
+      setShelfMeta(src, id, value, data); // 当日缓存写回
       bookMetaCache.set(key, { at: Date.now(), value });
       return value;
     } catch (e) {
@@ -660,7 +720,9 @@ async function quanbenPage() {
 async function bookPage() {
   const { id, src: pageSrc } = qs();
   const src = pageSrc || DEFAULT_SRC;
-  let data = await getBookData(src, id);
+  // 与书架同一套「当日一次」规则：当天校验过 → 直接用缓存整页渲染（0 请求）；
+  // 未校验/跨天 → 实时抓取并写缓存；失败退回旧快照。
+  let data = await loadBookDataDay(src, id);
   const srcName = data.srcName || src;
   const pager = data.pager || null; // 分页源（如木偶小说）返回 pager；keca/ibq 为 null
   const bidEnc = encodeURIComponent(id);
@@ -690,6 +752,19 @@ async function bookPage() {
       bmBtn.textContent = fav ? '★ 已收藏' : '☆ 收藏';
       bmBtn.classList.toggle('on', fav);
     });
+    // 备选按钮：与收藏独立，两边可同时存在
+    const candBtn = document.getElementById('candBtn');
+    if (!candBtn) return;
+    const paintCand = () => {
+      const on = isCandidate(src, id);
+      candBtn.textContent = on ? '✓ 已备选' : '☆ 备选';
+      candBtn.classList.toggle('on', on);
+    };
+    paintCand();
+    candBtn.addEventListener('click', () => {
+      toggleCandidate({ src, id, title: b.title, author: b.author, cover: b.cover });
+      paintCand();
+    });
   }
   function renderHead() {
     document.title = b.title + ' - 青简';
@@ -716,6 +791,7 @@ async function bookPage() {
         <div class="line">更新：${esc(b.update || '未知')}</div>
         ${contBtn}
         <button class="btn ghost" id="bmBtn" type="button">${isBookmarked(src, id) ? '★ 已收藏' : '☆ 收藏'}</button>
+        <button class="btn ghost" id="candBtn" type="button">${isCandidate(src, id) ? '✓ 已备选' : '☆ 备选'}</button>
       </div>`;
     bindBmBtn();
   }
@@ -726,10 +802,13 @@ async function bookPage() {
   renderHead();
   renderIntro();
 
+  // 「真正在读的那章」在目录里高亮（.chapter-list a.current 样式已内置）
+  const readProg = getProgress(src, id);
+  const curCid = readProg && readProg.cid;
   const render = (list, page) => {
     const pageParam = pager ? `&page=${page}` : '';
     ch.innerHTML = list
-      .map((c) => `<a href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`)
+      .map((c) => `<a${c.cid === curCid ? ' class="current"' : ''} href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`)
       .join('');
   };
   // L4：千章级目录一次性塞 DOM 会卡顿。CSS 用 content-visibility 让屏外条目跳过渲染，
@@ -739,20 +818,29 @@ async function bookPage() {
     const seq = ++_renderSeq;
     if (list.length <= 400) { render(list, page); return; }
     const pageParam = pager ? `&page=${page}` : '';
-    const html = (c) => `<a href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`;
+    const html = (c) => `<a${c.cid === curCid ? ' class="current"' : ''} href="${BASE}/read.html?src=${encodeURIComponent(src)}&bid=${bidEnc}&cid=${encodeURIComponent(c.cid)}${pageParam}">${esc(c.title)}</a>`;
     ch.innerHTML = list.slice(0, 400).map(html).join('');
     let i = 400;
     const step = () => {
-      if (seq !== _renderSeq || i >= list.length) return; // 已被新渲染取代
+      if (seq !== _renderSeq || i >= list.length) { if (seq === _renderSeq) scrollToCurrent(); return; } // 完成后再定位一次（目标可能在后续批次）
       ch.insertAdjacentHTML('beforeend', list.slice(i, i + 400).map(html).join(''));
       i += 400;
       setTimeout(step, 0);
     };
     setTimeout(step, 0);
   };
+  // 目录渲染完把「在读章节」滚到可视区中央；没在读任何章（未开始）则不动
+  const scrollToCurrent = () => {
+    if (!curCid) return;
+    requestAnimationFrame(() => {
+      const el = ch.querySelector('a.current');
+      if (el) el.scrollIntoView({ block: 'center' });
+    });
+  };
   const applyOrder = () => {
     const list = desc ? data.chapters.slice().reverse() : data.chapters;
     renderChunked(list, curPage);
+    scrollToCurrent();
     if (orderSeg) {
       orderSeg.querySelectorAll('button').forEach((btn) => {
         btn.classList.toggle('on', (btn.dataset.order === 'desc') === desc);
@@ -836,6 +924,7 @@ async function bookPage() {
   // 不重建页面状态（保留当前页码 / 正倒序 / 收藏按钮），不写 seen 基线。
   async function refreshBook() {
     const fresh = await getBookData(src, id);
+    setShelfMeta(src, id, buildBookMeta(fresh), fresh); // 强制刷新的结果写回当日缓存
     const wasAtLast = pager ? curPage >= pager.totalPages : true;
     data = fresh;
     b = fresh.book || b;
@@ -914,7 +1003,12 @@ function makeLCache(name, { ttl = 30 * 60 * 1000, max = 300 } = {}) {
 }
 
 // 各业务缓存实例（key 维度）。书籍详情/目录故意不设缓存：见 getBookData。
-const chCache = makeLCache('chapter', { ttl: 24 * 60 * 60 * 1000, max: 250 });   // 章节正文（P1）
+// 章节正文不再用 localStorage：服务端 /api/chapter/* 已有 24h 缓存，前端持久化的
+// 唯一增量收益是「跨会话重读旧章免一次 RTT」，却要常年背着 MB 级配额占用 +
+// 冷启动全量 JSON.parse + 每写一章全量回写。改为内存 Map（页面生命周期），
+// 预取/同会话翻章体验不变；跨会话重读走服务端缓存，不碰源站。
+const chapterMem = new Map(); // key -> 章节数据；超上限按插入序淘汰最旧
+const CHAPTER_MEM_MAX = 250;
 const listCache = makeLCache('list', { ttl: 10 * 60 * 1000, max: 60 });          // 首页/分类/排行/全本（P3）
 const searchCache = makeLCache('search', { ttl: 5 * 60 * 1000, max: 50 });      // 搜索结果（P3）
 
@@ -949,14 +1043,20 @@ function getBookData(src, id) {
   return api(U('/api/book/') + encodeURIComponent(src) + '/' + encodeURIComponent(id));
 }
 
-// ============ 章节内容缓存 + 预加载 ============
-// 章节正文发布后不再变化，可安全缓存：localStorage TTL 24h + LRU 250。
-// 后端 /api/chapter/* 另有 24h 服务端缓存；空正文不写入（源站异常时下次仍会重试）。
-// 解析规则变化（如过滤掉源站正文末尾的推广段）时递增 CHAPTER_CACHE_V，
-// 旧缓存 key 随之失效，用户无需手动清 localStorage。
-const CHAPTER_CACHE_V = 2;
-function ccGet(k) { return chCache.get(CHAPTER_CACHE_V + '|' + k); }
-function ccSet(k, v) { if (v && v.paragraphs && v.paragraphs.length) chCache.set(CHAPTER_CACHE_V + '|' + k, v); }
+// ============ 章节内容缓存（内存）+ 预加载 ============
+// 正文发布后不再变化，本会话内缓存安全；持久化交给服务端 24h 缓存（见上）。
+// 只缓存有正文的响应：源站异常时的空正文不写，下次仍会重试。
+function ccGet(k) { return chapterMem.get(k); }
+function ccSet(k, v) {
+  if (!v || !v.paragraphs || !v.paragraphs.length) return;
+  // 删了再 set：Map 保持「最近使用」在最后，淘汰时从最旧的头删
+  if (chapterMem.has(k)) chapterMem.delete(k);
+  chapterMem.set(k, v);
+  if (chapterMem.size > CHAPTER_MEM_MAX) {
+    const oldest = chapterMem.keys().next().value;
+    chapterMem.delete(oldest);
+  }
+}
 async function fetchChapter(src, bid, cid) {
   const k = src + '/' + bid + '/' + cid;
   const hit = ccGet(k);
@@ -977,7 +1077,7 @@ function prefetchChapter(src, bid, cid) {
 // ============ 阅读页（SPA：翻章不刷新整页） ============
 async function readPage() {
   const { bid, cid: startCid, src: pageSrc } = qs();
-  const data = await getBookData(pageSrc || DEFAULT_SRC, bid);
+  const data = await loadBookDataDay(pageSrc || DEFAULT_SRC, bid); // 同书页的当日缓存规则
   const src = data.src || pageSrc || DEFAULT_SRC;
   if (data.book) data.book.src = src;
   // 直接进入阅读页同样算已阅，刷新基线（避免从历史/深链进入时不灭）
@@ -1092,7 +1192,7 @@ async function readPage() {
     nav.innerHTML = `
       <a href="${prevHref}" class="nav-prev ${prev ? '' : 'disabled'}"${prev && prev.__page ? ` data-edge="prev" data-page="${prev.__page}"` : ''}>上一章</a>
       <a href="#" class="toc-trigger">目录</a>
-      <a href="${nextHref}" class="nav-next ${next ? '' : 'disabled'}"${next && next.__page ? ` data-edge="next" data-page="${next.__page}"` : ''}>下一章</a>`;
+      <a href="${nextHref}" class="nav-next ${next ? '' : 'disabled'}"${next && next.__page ? ` data-edge="next" data-page="${next.__page}"` : ''}>${next ? '下一章' : '已是最新章'}</a>`;
     // 目录高亮
     if (tocList) tocList.querySelectorAll('.toc-item').forEach((a) => a.classList.toggle('on', a.dataset.cid === cid));
     curPage = myPage; // 同步当前所在页（用于地址栏 / 浮层分页器）
@@ -1126,7 +1226,7 @@ async function readPage() {
       if (data.book) {
         addHistory({ src, id: bid, title: data.book.title, author: data.book.author, cover: data.book.cover, cid, ctitle: title, page: pager ? curPage : undefined });
       }
-      // 只预取下一章；已读章节不主动删除，由 chCache 的 TTL + LRU 统一淘汰
+      // 只预取下一章；已读章节不主动删除，由内存 LRU（CHAPTER_MEM_MAX）统一淘汰
       prefetchChapter(src, bid, next && next.cid);
       window.scrollTo(0, 0);
     } catch (e) {
@@ -1328,6 +1428,7 @@ function shelfRow(b, meta, prog, skeleton) {
     <div class="shelf-main">
       <div class="shelf-top">
         <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${encodeURIComponent(b.id)}">${esc(b.title)}</a>
+        ${srcBadgeHtml(src)}
         ${showUpdate ? '<span class="upd-badge">更新</span>' : ''}
       </div>
       <div class="shelf-progress${atLatest ? ' latest' : ''}">${esc(progressLine)}</div>
@@ -1346,7 +1447,10 @@ function historyRow(h) {
   return `<div class="shelf-item" data-id="${esc(h.id)}" data-src="${esc(src)}">
     <a class="cover-link" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${coverEl(h)}</a>
     <div class="shelf-main">
-      <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(h.title)}</a>
+      <div class="shelf-top">
+        <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(h.title)}</a>
+        ${srcBadgeHtml(src)}
+      </div>
       <div class="shelf-progress">读到：${esc(h.ctitle || '未知章节')}</div>
       <div class="shelf-update">${t ? t + ' · ' : ''}${esc(h.author || '')}</div>
     </div>
@@ -1390,6 +1494,110 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+// ============ 书籍数据「按源站更新时间」门控缓存（书架秒开 + 低频校验）============
+// 门控依据是「这本书什么时候更的」而不是「我什么时候查的」：
+//   ① 无缓存                 → 查（首见必查）
+//   ② status 完本/完结等      → 永不查，缓存一直用（status 从严判定，为空按连载）
+//   ③ update 日期 == 今天     → 不查；但距上次检查超 4h 仍查一次（防同日二更盲区）
+//   ④ update 日期 < 今天      → 查（今天的更新还没来）
+//   ⑤ update 缺失/解析失败    → 固定 2 小时兜底间隔（防永久跳过）
+// 检查只在打开书架/书页时懒触发（无后台轮询）；下拉刷新 force 永远强制全查。
+// localStorage 按 src:id 存 { meta, full?, checkedAt, at }：
+//   meta —— 书架行精简元数据（LRU 300，含 status/update 供门控）
+//   full —— 完整 /api/book payload（book/read 页整页复用；只留最近打开的 20 本）
+// 独立 key，不进 qingjian_userdata（不参与云同步）。
+const SHELF_META_KEY = 'qj_shelfmeta_v4';
+const SHELF_META_MAX = 300;   // meta 条目上限
+const SHELF_FULL_MAX = 20;    // 完整 payload 上限（大书目录可达百 KB，防配额爆）
+const SHELF_FALLBACK_MS = 2 * 60 * 60 * 1000;      // ⑤ 兜底间隔
+const SHELF_SAMEDAY_RECHECK_MS = 4 * 60 * 60 * 1000; // ③ 同日折中：超 4h 仍复查
+const FINISHED_RE = /完本|完结|已完结|大全|终章/;
+function localToday() {
+  const d = new Date();
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+function updateDateOf(meta) {
+  const m = String((meta && meta.update) || '').match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return null;
+  return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+}
+function loadShelfMetaStore() {
+  try {
+    const o = JSON.parse(localStorage.getItem(SHELF_META_KEY) || 'null');
+    if (o && o.v === 4 && o.map && typeof o.map === 'object') return o.map;
+  } catch (e) {}
+  return {};
+}
+function saveShelfMetaStore(map) {
+  const put = (m) => localStorage.setItem(SHELF_META_KEY, JSON.stringify({ v: 4, map: m }));
+  try { put(map); return; } catch (e) {}
+  // 配额溢出：先剥离所有 full payload 重试（meta 很小，几乎不会失败）
+  try {
+    const slim = {};
+    Object.keys(map).forEach((k) => { slim[k] = { ...map[k], full: undefined }; });
+    put(slim);
+  } catch (e) { /* 彻底失败则放弃本次写入，不影响页面 */ }
+}
+function pruneShelfFull(map) {
+  const withFull = Object.keys(map).filter((k) => map[k].full);
+  if (withFull.length <= SHELF_FULL_MAX) return;
+  withFull.sort((a, b) => (map[a].at || 0) - (map[b].at || 0))
+    .slice(0, withFull.length - SHELF_FULL_MAX)
+    .forEach((k) => { map[k].full = undefined; });
+}
+function setShelfMeta(src, id, meta, full) {
+  if (!meta || meta.error) return;
+  const map = loadShelfMetaStore();
+  const k = entityKey(src, id);
+  const old = map[k];
+  map[k] = {
+    meta,
+    // 未提供 full 时沿用旧值（书架校验不带 full 时不该抹掉书页正在用的 payload）
+    full: full !== undefined ? full : old ? old.full : undefined,
+    checkedAt: Date.now(),
+    at: Date.now(),
+  };
+  const keys = Object.keys(map);
+  if (keys.length > SHELF_META_MAX) {
+    keys.sort((a, b) => (map[a].at || 0) - (map[b].at || 0))
+      .slice(0, keys.length - SHELF_META_MAX)
+      .forEach((kk) => delete map[kk]);
+  }
+  pruneShelfFull(map);
+  saveShelfMetaStore(map);
+}
+// 门控核心：命中即「不请求」
+function isBookFresh(e) {
+  if (!e || !e.meta) return false;
+  const meta = e.meta;
+  if (FINISHED_RE.test(String(meta.status || ''))) return true;            // ② 完本
+  const ud = updateDateOf(meta);
+  if (!ud) return Date.now() - (e.checkedAt || 0) < SHELF_FALLBACK_MS;     // ⑤ 兜底
+  if (ud === localToday()) {                                               // ③ 今天已更
+    return Date.now() - (e.checkedAt || 0) < SHELF_SAMEDAY_RECHECK_MS;     //    超 4h 复查一次
+  }
+  return false;                                                            // ④ 日期<今天 → 查
+}
+function getShelfMetaCached(src, id) {
+  const e = loadShelfMetaStore()[entityKey(src, id)];
+  return isBookFresh(e) ? e.meta : null;
+}
+// 书页/阅读页入口：门控命中直接用缓存（0 请求）；过期实时抓并写缓存；
+// 实时失败时退回「旧 payload」（宁可旧目录也不白屏），没有任何缓存才向上抛错。
+async function loadBookDataDay(src, id) {
+  const e = loadShelfMetaStore()[entityKey(src, id)];
+  if (isBookFresh(e) && e.full) return e.full;
+  try {
+    const data = await getBookData(src, id);
+    setShelfMeta(src, id, buildBookMeta(data), data);
+    return data;
+  } catch (err) {
+    const stale = loadShelfMetaStore()[entityKey(src, id)];
+    if (stale && stale.full) return stale.full;
+    throw err;
+  }
+}
+
 let _shelfRenderSeq = 0;
 async function renderShelf(opts = {}) {
   const box = document.getElementById('shelf');
@@ -1403,18 +1611,70 @@ async function renderShelf(opts = {}) {
     return;
   }
   const isFresh = () => seq === _shelfRenderSeq;
-  // L5：骨架态还没有 meta，先不渲染 ⋮ 菜单，避免「继续」落到错误链接。
-  // 下拉刷新传 keepOld：保留现有行直到实时数据回来，避免刷新时整页闪一下骨架。
-  if (!opts.keepOld) box.innerHTML = list.map((b) => shelfRow(b, null, getProgress(b.src || curSrc, b.id), true)).join('');
-  const metas = await mapLimit(list, 4, (b) => getBookMeta(b.id, b.src || curSrc, { force: !!opts.force }));
-  if (!isFresh()) return;
-  // 冷启动：为没有基线的书建立起点（本次不亮），之后只在点进书时刷新基线。
-  // 必须在渲染前执行，且只在基线为空时写入，绝不覆盖已有基线。
-  list.forEach((b, i) => {
-    const m = metas[i];
-    if (m && !m.error && m.latestCid) ensureBaseline(b.src || curSrc, b.id, m.latestCid);
+  const rowHtml = (b, meta, skeleton) =>
+    shelfRow(b, meta, getProgress(b.src || curSrc, b.id), skeleton);
+
+  // 第一遍：当日缓存直接用（0 请求秒开），无缓存/跨天的收集为待校验项。
+  // force（下拉刷新）= 全部视为过期，强制逐本回源。
+  const metas = list.map((b) =>
+    opts.force ? null : getShelfMetaCached(b.src || curSrc, b.id)
+  );
+  const staleIdx = [];
+  list.forEach((b, i) => { if (!metas[i]) staleIdx.push(i); });
+
+  // 首屏渲染：有缓存的行直接展示真实数据；待校验的行先给骨架（skeleton=true，
+  // 不渲染 ⋮ 菜单，避免「继续」链接在 meta 缺失时落到错误目标）。
+  // keepOld 时保留现有 DOM，只把「还是骨架/错误态」的行用缓存数据画出来。
+  if (!opts.keepOld) {
+    box.innerHTML = list.map((b, i) => rowHtml(b, metas[i], !metas[i])).join('');
+  } else {
+    list.forEach((b, i) => {
+      if (!metas[i]) return;
+      const el = box.querySelector(`.shelf-item[data-id="${CSS.escape(String(b.id))}"][data-src="${CSS.escape(String(b.src || curSrc))}"]`);
+      if (el && el.querySelector('.shelf-more')) return; // 已是真实行，不闪
+      el.outerHTML = rowHtml(b, metas[i]);
+    });
+  }
+
+  // 「上次检查更新 · HH:MM」：所有书 24h 内都被检查过时显示最近一次校验时间，
+  // 区分「查过了但源站没新章」（连载书 update<今天属正常，下次打开仍会复查）
+  // 和「还没查过」。有任何书从没查过/太久没查则隐藏。
+  const paintCheckStamp = () => {
+    const el = document.getElementById('shelfCheck');
+    if (!el) return;
+    const map = loadShelfMetaStore();
+    const now = Date.now();
+    // 需要检查的 = 非完本且已有缓存条目的书；全部在 24h 内查过才显示
+    const monitored = list
+      .map((b) => map[entityKey(b.src || curSrc, b.id)])
+      .filter((m) => m && m.meta && !FINISHED_RE.test(String(m.meta.status || '')));
+    const checked = monitored.filter((e) => e.checkedAt && now - e.checkedAt < 24 * 60 * 60 * 1000);
+    if (!monitored.length || checked.length < monitored.length) { el.hidden = true; return; }
+    const t = new Date(Math.max(...checked.map((e) => e.checkedAt)));
+    el.textContent = `上次检查更新 · ${('0' + t.getHours()).slice(-2)}:${('0' + t.getMinutes()).slice(-2)}（连载书每天都会复查；完本书不检查）`;
+    el.hidden = false;
+  };
+
+  // 第二遍：只对待校验项限流回源（每天每本最多一次；force 时全量），
+  // 成功写日缓存并就地替换该行，失败保留现状（旧快照/骨架），下次打开自动重试。
+  await mapLimit(staleIdx, 4, async (i) => {
+    const b = list[i];
+    const src = b.src || curSrc;
+    const meta = await getBookMeta(b.id, src, { force: true });
+    if (!isFresh()) return;
+    if (meta && !meta.error) {
+      // 日缓存已由 getBookMeta 内部写入（含完整 payload），这里只负责基线与行更新
+      if (meta.latestCid) ensureBaseline(src, b.id, meta.latestCid);
+      metas[i] = meta;
+    } else {
+      // 失败：没有旧快照就明确显示「暂时无法获取」，不伪装成未开始
+      metas[i] = metas[i] || { error: true };
+    }
+    const el = box.querySelector(`.shelf-item[data-id="${CSS.escape(String(b.id))}"][data-src="${CSS.escape(String(src))}"]`);
+    if (el) el.outerHTML = rowHtml(b, metas[i]);
   });
-  box.innerHTML = list.map((b, i) => shelfRow(b, metas[i], getProgress(b.src || curSrc, b.id))).join('');
+  if (!isFresh()) return;
+  paintCheckStamp();
 }
 
 function renderHistory() {
@@ -1422,10 +1682,41 @@ function renderHistory() {
   if (!box) return;
   const list = getHistory();
   const c = document.getElementById('histCount');
-  if (c) c.textContent = list.length ? `共 ${list.length} 本` : '';
+  if (c) c.textContent = list.length ? `共 ${list.length} 条` : '';
   box.innerHTML = list.length
     ? list.map(historyRow).join('')
     : '<div class="empty">还没有阅读历史，去随便读几章吧～</div>';
+}
+
+// 备选一行：封面 / 书名 / 来源 / 作者 + 「加入书架」「移除」。
+// 点书名仍进详情页；不在备选行做元数据请求（暂存区没必要查更新）。
+function candRow(b) {
+  const src = b.src || curSrc;
+  const hid = encodeURIComponent(b.id);
+  return `<div class="shelf-item cand-item" data-id="${esc(b.id)}" data-src="${esc(src)}">
+    <a class="cover-link" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${coverEl(b)}</a>
+    <div class="shelf-main">
+      <div class="shelf-top">
+        <a class="shelf-title" href="${BASE}/book.html?src=${encodeURIComponent(src)}&id=${hid}">${esc(b.title || '未知书名')}</a>
+        ${srcBadgeHtml(src)}
+      </div>
+      <div class="shelf-progress">${esc(b.author || '')}${b.author ? ' · ' : ''}${timeAgo(b.addedAt)}加入</div>
+    </div>
+    <div class="cand-actions">
+      <button class="cand-promote" data-id="${esc(b.id)}" data-src="${esc(src)}" type="button">加入书架</button>
+      <button class="cand-remove" data-id="${esc(b.id)}" data-src="${esc(src)}" type="button">移除</button>
+    </div>
+  </div>`;
+}
+function renderCands() {
+  const box = document.getElementById('cands');
+  if (!box) return;
+  const list = getCandidates();
+  const c = document.getElementById('candCount');
+  if (c) c.textContent = list.length ? `共 ${list.length} 本` : '';
+  box.innerHTML = list.length
+    ? list.map(candRow).join('')
+    : '<div class="empty">备选还是空的，去书籍详情页点「☆ 备选」吧～</div>';
 }
 
 async function shelfPage() {
@@ -1433,11 +1724,14 @@ async function shelfPage() {
   const tabs = document.getElementById('shelfTabs');
   const paneShelf = document.getElementById('shelfPane');
   const paneHist = document.getElementById('historyPane');
+  const paneCand = document.getElementById('candPane');
   const switchTab = (name) => {
     if (tabs) tabs.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
     if (paneShelf) paneShelf.hidden = name !== 'shelf';
     if (paneHist) paneHist.hidden = name !== 'history';
+    if (paneCand) paneCand.hidden = name !== 'cand';
     if (name === 'history') renderHistory();
+    if (name === 'cand') renderCands();
   };
   if (tabs) tabs.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
@@ -1449,6 +1743,7 @@ async function shelfPage() {
     QJSync.mount({ onSynced: (info) => {
       if (info && info.changed === false) return;
       renderShelf({ keepOld: true });
+      renderCands(); // 备选无网络请求，直接重画；另一台设备的增删能即时反映
     } });
   }
   // 下拉刷新（公共模块）：先同步再重渲染，顺带把另一台设备的改动拉过来。
@@ -1489,8 +1784,23 @@ async function shelfPage() {
     if (e.persisted) renderShelf({ keepOld: true });
   });
 
-  // 全局点击委托：⋮ 打开菜单 / 菜单内「移出书架」/ 点击别处关闭菜单
+  // 全局点击委托：⋮ 打开菜单 / 菜单内「移出书架」/ 备选行操作 / 点击别处关闭菜单
   document.addEventListener('click', (e) => {
+    // 备选：加入书架（promoteCandidate 内部会重画备选）与直接移除
+    const promote = e.target.closest('.cand-promote');
+    if (promote) {
+      promoteCandidate(promote.dataset.src, promote.dataset.id);
+      renderCands();
+      // 若该书已在书架，书架列表也变了；提前渲染过骨架，这里重画保证计数正确
+      renderShelf().catch(() => {});
+      return;
+    }
+    const candRm = e.target.closest('.cand-remove');
+    if (candRm) {
+      toggleCandidate({ src: candRm.dataset.src, id: candRm.dataset.id });
+      renderCands();
+      return;
+    }
     const more = e.target.closest('.shelf-more');
     if (more) {
       e.preventDefault();

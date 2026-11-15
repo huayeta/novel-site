@@ -177,6 +177,7 @@ img { display: block; max-width: 100%; }
   background: #fff; border: 0; color: var(--primary); cursor: pointer;
 }
 .reader-nav a:active, .reader-nav button:active { background: #f0f0f0; }
+.reader-nav a.disabled { color: var(--muted); pointer-events: none; }
 
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }
 .loading { text-align: center; color: var(--muted); padding: 40px 0; }
@@ -267,6 +268,16 @@ html[data-theme="eye"] .reader-tools button { background: #ece1c8; color: #5b4a2
   flex: none; align-self: center; color: var(--primary); font-size: 13px;
   text-decoration: none; border: 1px solid var(--primary); border-radius: 16px; padding: 4px 12px;
 }
+
+/* 备选清单 */
+.cand-actions { flex: none; display: flex; flex-direction: column; gap: 6px; align-self: center; }
+.cand-actions button {
+  font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  border-radius: 14px; padding: 4px 12px;
+}
+.cand-promote { color: #fff; background: var(--primary); border: 1px solid var(--primary); }
+.cand-remove { color: var(--muted); background: #fff; border: 1px solid var(--border); }
+.cand-tip { font-size: 12px; color: var(--muted); line-height: 1.6; margin-top: 10px; }
 
 /* 行内 ⋮ 弹出菜单 */
 .row-menu {

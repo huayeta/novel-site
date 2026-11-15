@@ -1192,7 +1192,12 @@ async function readPage() {
     nav.innerHTML = `
       <a href="${prevHref}" class="nav-prev ${prev ? '' : 'disabled'}"${prev && prev.__page ? ` data-edge="prev" data-page="${prev.__page}"` : ''}>上一章</a>
       <a href="#" class="toc-trigger">目录</a>
-      <a href="${nextHref}" class="nav-next ${next ? '' : 'disabled'}"${next && next.__page ? ` data-edge="next" data-page="${next.__page}"` : ''}>${next ? '下一章' : '已是最新章'}</a>`;
+      <a href="${nextHref}" class="nav-next ${next ? '' : 'disabled'}"${next && next.__page ? ` data-edge="next" data-page="${next.__page}"` : ''}>${next ? '下一章' : '已是最新章'}</a>`
+      .replace(
+        // 已是最新章：第三格改为「返回目录」链接（回书籍详情页），不再是死按钮
+        /<a href="#" class="nav-next disabled"[^>]*>已是最新章<\/a>/,
+        `<a href="${BASE}/book.html?src=${encodeURIComponent(src)}&bid=${bid}" class="nav-back">返回目录</a>`
+      );
     // 目录高亮
     if (tocList) tocList.querySelectorAll('.toc-item').forEach((a) => a.classList.toggle('on', a.dataset.cid === cid));
     curPage = myPage; // 同步当前所在页（用于地址栏 / 浮层分页器）
@@ -1316,6 +1321,8 @@ async function readPage() {
   const goPrev = () => crossPage(prev);
   const goNext = () => crossPage(next);
   if (nav) nav.addEventListener('click', (e) => {
+    // 「返回目录」（已是最新章时出现）是普通链接，放行默认跳转
+    if (e.target.closest('.nav-back')) return;
     if (e.target.closest('.nav-prev')) { e.preventDefault(); goPrev(); }
     else if (e.target.closest('.nav-next')) { e.preventDefault(); goNext(); }
   });

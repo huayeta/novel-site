@@ -1845,20 +1845,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const tb = document.querySelector('.topbar');
   if (tb && !tb.querySelector('.navlink')) {
     const sf = tb.querySelector('.search');
-    const hist = document.createElement('a');
-    hist.className = 'navlink';
-    hist.href = U('/shelf.html');
-    hist.textContent = '历史';
-    hist.addEventListener('click', (e) => {
-      // 跳到书架页并直接切到「历史」标签
-      e.preventDefault();
-      location.href = U('/shelf.html?tab=history');
-    });
     const a = document.createElement('a');
     a.className = 'navlink';
     a.href = U('/shelf.html');
     a.textContent = '书架';
-    tb.insertBefore(hist, sf);
     tb.insertBefore(a, sf);
   }
   if (map[page]) map[page]().catch((e) => {

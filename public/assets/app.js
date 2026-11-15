@@ -1643,25 +1643,6 @@ async function renderShelf(opts = {}) {
     });
   }
 
-  // 「上次检查更新 · HH:MM」：所有书 24h 内都被检查过时显示最近一次校验时间，
-  // 区分「查过了但源站没新章」（连载书 update<今天属正常，下次打开仍会复查）
-  // 和「还没查过」。有任何书从没查过/太久没查则隐藏。
-  const paintCheckStamp = () => {
-    const el = document.getElementById('shelfCheck');
-    if (!el) return;
-    const map = loadShelfMetaStore();
-    const now = Date.now();
-    // 需要检查的 = 非完本且已有缓存条目的书；全部在 24h 内查过才显示
-    const monitored = list
-      .map((b) => map[entityKey(b.src || curSrc, b.id)])
-      .filter((m) => m && m.meta && !FINISHED_RE.test(String(m.meta.status || '')));
-    const checked = monitored.filter((e) => e.checkedAt && now - e.checkedAt < 24 * 60 * 60 * 1000);
-    if (!monitored.length || checked.length < monitored.length) { el.hidden = true; return; }
-    const t = new Date(Math.max(...checked.map((e) => e.checkedAt)));
-    el.textContent = `上次检查更新 · ${('0' + t.getHours()).slice(-2)}:${('0' + t.getMinutes()).slice(-2)}（连载书每天都会复查；完本书不检查）`;
-    el.hidden = false;
-  };
-
   // 第二遍：只对待校验项限流回源（每天每本最多一次；force 时全量），
   // 成功写日缓存并就地替换该行，失败保留现状（旧快照/骨架），下次打开自动重试。
   await mapLimit(staleIdx, 4, async (i) => {
@@ -1681,7 +1662,6 @@ async function renderShelf(opts = {}) {
     if (el) el.outerHTML = rowHtml(b, metas[i]);
   });
   if (!isFresh()) return;
-  paintCheckStamp();
 }
 
 function renderHistory() {

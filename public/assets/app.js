@@ -221,8 +221,14 @@ function applyReaderSettings(s) {
 function getBookmarks() {
   return Object.values(loadState().books)
     .filter((b) => b && !b.deleted)
-    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-    .map((b) => ({ src: b.src, id: b.id, title: b.title, author: b.author, cover: b.cover, addedAt: b.addedAt }));
+    // 最近点开的排最前；都没点过（老数据）时退回「新收藏靠前」。
+    .sort((a, b) =>
+      (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0) || (b.addedAt || 0) - (a.addedAt || 0)
+    )
+    .map((b) => ({
+      src: b.src, id: b.id, title: b.title, author: b.author, cover: b.cover,
+      addedAt: b.addedAt, lastOpenedAt: b.lastOpenedAt || 0,
+    }));
 }
 function saveBookmarks(list) {
   const s = loadState();
@@ -240,6 +246,8 @@ function saveBookmarks(list) {
     s.books[k] = {
       src, id: b.id, title, author, cover,
       addedAt: base ? base.addedAt : (b.addedAt || now - i), // 新收藏靠前
+      // 置顶顺序不能被「收藏/移出」操作抹掉：优先取传入值，其次沿用旧值
+      lastOpenedAt: b.lastOpenedAt || (base && base.lastOpenedAt) || 0,
       ts: changed ? now : (base ? base.ts : now),
       deleted: false,
     };
@@ -274,6 +282,19 @@ function removeBookmark(src, id) {
     saveBookmarks(list);
     clearSeenLatest(src || DEFAULT_SRC, id); // 移出书架清掉基线，重新收藏后从「首次看见」开始
   }
+}
+
+// 点开书架里的一本书 → 记下「最近打开」，返回书架时它排到首位。
+// 必须同时刷 ts：云同步 mergeMap 按 ts 取大者，否则远端旧版本会把这个字段盖掉。
+// 只改已在书架里的书，绝不创建幽灵条目（历史页里已移出的书点了也不受影响）。
+function touchBookmark(src, id) {
+  const s = loadState();
+  const b = s.books[entityKey(src || DEFAULT_SRC, id)];
+  if (!b || b.deleted) return;
+  const now = Date.now();
+  b.lastOpenedAt = now;
+  b.ts = now;
+  saveState();
 }
 
 // ============ 阅读历史（统一状态对象）============
@@ -1446,6 +1467,27 @@ async function shelfPage() {
   }
   // 支持从顶部导航「历史」直接进到历史标签
   if (qs().tab === 'history') switchTab('history');
+
+  // 点开书架里的一本书（封面 / 书名 / ⋮ 菜单里的「继续阅读」「查看详情」）→ 记下最近打开，
+  // 返回书架时它排到首位。这里只写状态、不重排 DOM：重排会替换掉被点击的 <a> 节点，
+  // 可能干扰浏览器默认跳转；顺序由重新进入页面或 pageshow 时的 renderShelf 反映。
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    const href = a.getAttribute('href') || '';
+    if (!/book\.html|read\.html/.test(href)) return;
+    const holder = a.closest('.shelf-item') || a.closest('.row-menu');
+    if (!holder) return;
+    const id = holder.dataset.id || holder.dataset.rid;
+    const src = holder.dataset.src || holder.dataset.rsrc;
+    if (id) touchBookmark(src, id);
+  });
+
+  // 从详情页 / 阅读页返回时浏览器可能走 bfcache（JS 不重跑），
+  // 主动重排一次，避免看到的还是点击前的旧顺序。
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) renderShelf({ keepOld: true });
+  });
 
   // 全局点击委托：⋮ 打开菜单 / 菜单内「移出书架」/ 点击别处关闭菜单
   document.addEventListener('click', (e) => {

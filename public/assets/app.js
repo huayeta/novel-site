@@ -1767,7 +1767,7 @@ async function shelfPage() {
       ? `<div class="sheet-body" id="shareBody"><div class="empty">正在载入书单…</div></div>
          <div class="sheet-actions">
            <button type="button" id="shareCopy" class="btn ghost" hidden>复制分享码</button>
-           <button type="button" id="shareCopyIds" class="btn ghost" hidden>复制书籍ID</button>
+           <button type="button" id="shareCopyIds" class="btn ghost">复制书籍ID</button>
          </div>`
       : `<div class="sheet-body">
            <div class="share-tip">输入朋友发给你的分享码，预览后导入到你的书架/备选。已有的书不会重复导入。</div>
@@ -1816,10 +1816,29 @@ async function shelfPage() {
         ${cands.length ? '<div class="share-tip">— 备选 —</div>' + rows(cands, 'cands', false) : ''}
       </div>
       <div class="sheet-actions"><button type="button" id="shareGen" class="btn">生成分享码</button></div>`;
+    // 实时勾选快照：复制书籍ID/生成分享码都从这里取，生成后勾选变化也不丢
+    let currentSel = null;
+    const collectSel = () => {
+      const collect = (kind) => [...bodyEl.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map((c) => c.dataset.key);
+      return { books: collect('books'), cands: collect('cands') };
+    };
+    currentSel = collectSel();
+    bodyEl.addEventListener('change', () => { currentSel = collectSel(); });
+    // 「复制书籍ID」：进弹窗即可点，复制当前勾选的 src:id（单行空格分隔），
+    // 对方在导入弹窗按 ID 粘贴即可，全程不经服务端分享码
+    const idsBtn = document.getElementById('shareCopyIds');
+    if (idsBtn) {
+      idsBtn.hidden = false;
+      idsBtn.onclick = async () => {
+        const ids = currentSel.books.join(' ');
+        try { await navigator.clipboard.writeText(ids); } catch (e) {}
+        idsBtn.textContent = ids ? '已复制 ✓' : '无勾选';
+        setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 1500);
+      };
+    }
     const genBtn = bodyEl.querySelector('#shareGen');
     genBtn.addEventListener('click', async () => {
-      const collect = (kind) => [...bodyEl.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map((c) => c.dataset.key);
-      sel = { books: collect('books'), cands: collect('cands') };
+      sel = collectSel();
       if (!sel.books.length && !sel.cands.length) {
         bodyEl.querySelector('#shareGen').textContent = '至少勾选一本';
         setTimeout(() => { bodyEl.querySelector('#shareGen').textContent = '生成分享码'; }, 1500);
@@ -1855,15 +1874,6 @@ async function shelfPage() {
           try { await navigator.clipboard.writeText(code); } catch (e) { /* 剪贴板失败静默 */ }
           copyBtn.textContent = '已复制 ✓';
           setTimeout(() => { copyBtn.textContent = '复制分享码'; }, 1500);
-        };
-        // 「复制书籍ID」：把勾中的书以 src:id 单行（空格分隔）复制出去，
-        // 对方在导入弹窗按 ID 粘贴即可，全程不经服务端分享码
-        const idsBtn = sheet.querySelector('#shareCopyIds');
-        idsBtn.hidden = false;
-        idsBtn.onclick = async () => {
-          try { await navigator.clipboard.writeText(sel.books.join(' ')); } catch (e) {}
-          idsBtn.textContent = '已复制 ✓';
-          setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 1500);
         };
       } catch (err) {
         genBtn.disabled = false;

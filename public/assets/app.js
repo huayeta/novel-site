@@ -1750,6 +1750,217 @@ async function shelfPage() {
   // 支持从顶部导航「历史」直接进到历史标签
   if (qs().tab === 'history') switchTab('history');
 
+  // ---------- 分享 / 导入：把我的书架+备选分享给另一个人 ----------
+  // 分享 = 把 {books, candidates} 快照 PUT 到一个分享码下（同码复用，重复分享即更新）；
+  // 导入 = 输入分享码 GET 预览，确认后合并进本地（已有书/备选跳过，绝不覆盖已有状态）。
+  const SHARE_CODE_KEY = 'qingjian_share_code';
+  const SHARE_CODE_RE = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+  const openShareSheet = (mode) => {
+    let sheet = document.getElementById('shareSheet');
+    if (!sheet) {
+      sheet = document.createElement('div');
+      sheet.id = 'shareSheet';
+      sheet.className = 'overlay';
+      document.body.appendChild(sheet);
+    }
+    const bodyHTML = mode === 'share'
+      ? `<div class="sheet-body" id="shareBody"><div class="empty">正在载入书单…</div></div>
+         <div class="sheet-actions">
+           <button type="button" id="shareCopy" class="btn ghost" hidden>复制分享码</button>
+           <button type="button" id="shareCopyIds" class="btn ghost" hidden>复制书籍ID</button>
+         </div>`
+      : `<div class="sheet-body">
+           <div class="share-tip">输入朋友发给你的分享码，预览后导入到你的书架/备选。已有的书不会重复导入。</div>
+           <div class="share-row"><input id="shareCodeInput" class="share-input" maxlength="14" placeholder="XXXX-XXXX-XXXX" autocomplete="off"></div>
+           <div class="sheet-actions"><button type="button" id="shareFetch" class="btn">获取预览</button></div>
+           <div id="sharePreview"></div>
+           <div class="share-tip">或按小说 ID 导入（每行一个，支持 src:id 或纯 ID）：</div>
+           <div class="share-row">
+             <textarea id="shareIds" class="share-textarea" rows="4" placeholder="例如：&#10;ibq:220513&#10;xq:5185"></textarea>
+           </div>
+           <div class="share-row">
+             <select id="shareSrcSel" class="share-input">${Object.entries(SOURCE_NAME_MAP).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join('')}</select>
+           </div>
+           <div class="sheet-actions"><button type="button" id="idImport" class="btn">按 ID 导入</button></div>
+           <div id="idImportStatus" class="share-tip"></div>
+         </div>`;
+    sheet.innerHTML = `<div class="sheet">
+      <div class="sheet-head"><span>${mode === 'share' ? '分享我的书架' : '导入别人的分享'}</span>
+        <button type="button" id="shareClose" aria-label="关闭">✕</button></div>
+      ${bodyHTML}
+    </div>`;
+    sheet.hidden = false;
+    sheet.querySelector('#shareClose').addEventListener('click', () => { sheet.hidden = true; });
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.hidden = true; });
+    return sheet;
+  };
+
+  const shareShelfBtn = document.getElementById('shareShelfBtn');
+  if (shareShelfBtn) shareShelfBtn.addEventListener('click', async () => {
+    const sheet = openShareSheet('share');
+    const bodyEl = sheet.querySelector('#shareBody');
+    // 勾选式分享：只上传勾中的书/备选。上次勾选默认保留；首次（无存储）全选。
+    let sel = null;
+    try { sel = JSON.parse(localStorage.getItem('qingjian_share_sel')); } catch (e) {}
+    const books = getBookmarks();
+    const cands = getCandidates();
+    const rows = (items, kind, def) => items.map((b) => {
+      const k = entityKey(b.src || DEFAULT_SRC, b.id);
+      const on = (sel && sel[kind]) ? sel[kind].includes(k) : def;
+      return `<label class="share-item"><input type="checkbox" data-kind="${kind}" data-key="${esc(k)}"${on ? ' checked' : ''}> ${esc(b.title || '未知书名')}</label>`;
+    }).join('');
+    bodyEl.innerHTML = `
+      <div class="share-tip">勾选要分享的书（书架 ${books.length} 本 · 备选 ${cands.length} 本），再生成分享码。</div>
+      <div class="share-list">
+        ${books.length ? rows(books, 'books', true) : '<div class="share-item">书架还是空的</div>'}
+        ${cands.length ? '<div class="share-tip">— 备选 —</div>' + rows(cands, 'cands', false) : ''}
+      </div>
+      <div class="sheet-actions"><button type="button" id="shareGen" class="btn">生成分享码</button></div>`;
+    const genBtn = bodyEl.querySelector('#shareGen');
+    genBtn.addEventListener('click', async () => {
+      const collect = (kind) => [...bodyEl.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map((c) => c.dataset.key);
+      sel = { books: collect('books'), cands: collect('cands') };
+      if (!sel.books.length && !sel.cands.length) {
+        bodyEl.querySelector('#shareGen').textContent = '至少勾选一本';
+        setTimeout(() => { bodyEl.querySelector('#shareGen').textContent = '生成分享码'; }, 1500);
+        return;
+      }
+      genBtn.disabled = true;
+      genBtn.textContent = '生成中…';
+      try {
+        // 分享码每账号复用：存在则沿用并覆盖快照，朋友重新导入即得最新
+        let code = localStorage.getItem(SHARE_CODE_KEY);
+        if (!code || !SHARE_CODE_RE.test(code)) {
+          // 注意不能用 api()/apiRaw()：它们固定 GET，会被 /api/share/:code 路由误伤
+          const r = await fetch(U('/api/share/new'), { method: 'POST' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          code = (await r.json()).code;
+          localStorage.setItem(SHARE_CODE_KEY, code);
+        }
+        const pick = (kind, items) => items.filter((b) => sel[kind].includes(entityKey(b.src || DEFAULT_SRC, b.id)));
+        const payload = { books: pick('books', books), candidates: pick('cands', cands) };
+        await fetch(U('/api/share/') + encodeURIComponent(code), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        localStorage.setItem('qingjian_share_sel', JSON.stringify(sel));
+        bodyEl.innerHTML = `
+          <div class="share-tip">已分享 ${payload.books.length} 本书、${payload.candidates.length} 本备选。</div>
+          <div class="share-tip">把下面的分享码发给朋友，对方在书架页点「导入」输入即可。有变化再点「分享」更新到同一个码。</div>
+          <div class="share-code">${esc(code)}</div>`;
+        const copyBtn = sheet.querySelector('#shareCopy');
+        copyBtn.hidden = false;
+        copyBtn.onclick = async () => {
+          try { await navigator.clipboard.writeText(code); } catch (e) { /* 剪贴板失败静默 */ }
+          copyBtn.textContent = '已复制 ✓';
+          setTimeout(() => { copyBtn.textContent = '复制分享码'; }, 1500);
+        };
+        // 「复制书籍ID」：把勾中的书以 src:id 单行（空格分隔）复制出去，
+        // 对方在导入弹窗按 ID 粘贴即可，全程不经服务端分享码
+        const idsBtn = sheet.querySelector('#shareCopyIds');
+        idsBtn.hidden = false;
+        idsBtn.onclick = async () => {
+          try { await navigator.clipboard.writeText(sel.books.join(' ')); } catch (e) {}
+          idsBtn.textContent = '已复制 ✓';
+          setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 1500);
+        };
+      } catch (err) {
+        genBtn.disabled = false;
+        genBtn.textContent = '生成分享码';
+        bodyEl.innerHTML = `<div class="empty">生成分享码失败：${esc(err.message || '网络错误')}</div>`;
+      }
+    });
+  });
+
+  const importShelfBtn = document.getElementById('importShelfBtn');
+  if (importShelfBtn) importShelfBtn.addEventListener('click', () => {
+    const sheet = openShareSheet('import');
+    const input = sheet.querySelector('#shareCodeInput');
+    input.focus();
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sheet.querySelector('#shareFetch').click(); });
+    sheet.querySelector('#shareFetch').addEventListener('click', async () => {
+      const code = (input.value || '').trim().toUpperCase();
+      const preview = sheet.querySelector('#sharePreview');
+      if (!SHARE_CODE_RE.test(code)) { preview.innerHTML = '<div class="empty">分享码格式不对（应为 XXXX-XXXX-XXXX）</div>'; return; }
+      preview.innerHTML = '<div class="empty">获取中…</div>';
+      try {
+        const d = await api(U('/api/share/') + encodeURIComponent(code));
+        const books = (d.books || []).filter((b) => b && b.id);
+        const cands = (d.candidates || []).filter((c) => c && c.id);
+        if (!books.length && !cands.length) { preview.innerHTML = '<div class="empty">这个分享码还没有内容，或已失效。</div>'; return; }
+        preview.innerHTML = `
+          <div class="share-tip">书架 ${books.length} 本 · 备选 ${cands.length} 本：</div>
+          <div class="share-list">${[...books, ...cands].slice(0, 50).map((b) => `<div class="share-item">${esc(b.title || '未知书名')}</div>`).join('')}${books.length + cands.length > 50 ? '<div class="share-item">…</div>' : ''}</div>
+          <div class="sheet-actions"><button type="button" id="shareImport" class="btn">确认导入</button></div>`;
+        sheet.querySelector('#shareImport').addEventListener('click', () => {
+          // 书架：只补不覆盖——已收藏的跳过，新导入的置前
+          const active = getBookmarks();
+          const have = new Set(active.map((b) => entityKey(b.src || DEFAULT_SRC, b.id)));
+          const addBooks = books.filter((b) => !have.has(entityKey(b.src, b.id)))
+            .map((b) => ({ ...b, addedAt: Date.now() }));
+          saveBookmarks([...addBooks, ...active]);
+          // 备选：已收藏/已备选的跳过
+          const s = loadState();
+          const now = Date.now();
+          let cImported = 0;
+          cands.forEach((c) => {
+            const k = entityKey(c.src, c.id);
+            if (s.books[k] && !s.books[k].deleted) return;
+            if (s.candidates[k] && !s.candidates[k].deleted) return;
+            s.candidates[k] = { src: c.src, id: c.id, title: c.title || '', author: c.author || '',
+              cover: c.cover || '', addedAt: now, ts: now, deleted: false };
+            cImported++;
+          });
+          saveState();
+          renderShelf().catch(() => {});
+          renderCands();
+          preview.innerHTML = `<div class="share-tip">导入完成：书架 +${addBooks.length} 本，备选 +${cImported} 本。</div>`;
+          sheet.querySelector('#shareImport').disabled = true;
+        });
+      } catch (e) {
+        preview.innerHTML = `<div class="empty">获取失败：${esc(e.message || '网络错误')}</div>`;
+      }
+    });
+    // ---------- 按 ID 导入 ----------
+    const idBtn = sheet.querySelector('#idImport');
+    if (idBtn) idBtn.addEventListener('click', async () => {
+      const status = sheet.querySelector('#idImportStatus');
+      const srcSel = sheet.querySelector('#shareSrcSel').value || DEFAULT_SRC;
+      const raw = sheet.querySelector('#shareIds').value || '';
+      // 每行/每段一个：src:id 或纯 ID（纯 ID 用下拉选中的源）
+      const tokens = [...new Set(raw.split(/[\s,，;；]+/).filter(Boolean).map((t) => (t.includes(':') ? t : srcSel + ':' + t)))];
+      if (!tokens.length) { status.textContent = '请先粘贴要导入的小说 ID'; return; }
+      idBtn.disabled = true;
+      status.textContent = `正在导入 0/${tokens.length} …`;
+      // 并发 4 实时拉取每本书的真实信息（标题/作者），顺便写入当日缓存
+      const results = await mapLimit(tokens, 4, async (k) => {
+        const sep = k.lastIndexOf(':');
+        const s = k.slice(0, sep), id = k.slice(sep + 1);
+        try {
+          const meta = await getBookMeta(id, s, { force: true });
+          return meta.error ? { k, ok: false } : { k, ok: true, meta, id, s };
+        } catch (e) { return { k, ok: false }; }
+      });
+      // 已收藏的跳过（含导入过程中刚加进来的）
+      const active = getBookmarks();
+      const have = new Set(active.map((b) => entityKey(b.src || DEFAULT_SRC, b.id)));
+      const adds = [];
+      let fail = 0;
+      results.forEach((r) => {
+        if (!r.ok) { fail++; return; }
+        if (!have.has(entityKey(r.s, r.id))) {
+          adds.push({ src: r.s, id: r.id, title: r.meta.title, author: r.meta.author, cover: r.meta.cover });
+        }
+      });
+      if (adds.length) saveBookmarks([...adds, ...active]);
+      renderShelf().catch(() => {});
+      renderCands();
+      status.textContent = `导入完成：成功 ${adds.length} 本${fail ? `，失败 ${fail} 本` : ''}（新书已进书架并置顶）。`;
+      idBtn.disabled = false;
+    });
+  });
+
   // 点开书架里的一本书（封面 / 书名 / ⋮ 菜单里的「继续阅读」「查看详情」）→ 记下最近打开，
   // 返回书架时它排到首位。这里只写状态、不重排 DOM：重排会替换掉被点击的 <a> 节点，
   // 可能干扰浏览器默认跳转；顺序由重新进入页面或 pageshow 时的 renderShelf 反映。

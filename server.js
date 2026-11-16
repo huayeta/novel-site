@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { getSource, listSources, defaultSource, searchAll } from './lib/sources/index.js';
 import { createCache } from './lib/cache.js';
 import * as syncStore from './lib/sync-store.js';
+import * as shareStore from './lib/share-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -351,6 +352,32 @@ api.put('/api/sync/:code', syncNoStore, express.json({ limit: '600kb' }), wrap(a
   if (r.conflict) return res.status(409).json({ rev: r.rev, data: r.data });
   if (!r.ok) return res.status(400).json({ error: r.error || 'write failed' });
   res.json({ rev: r.rev });
+}));
+
+// ---------- 书架分享（把书架+备选分享给另一个人导入）----------
+// 与同步码同一套安全模式：sha256 文件名、no-store、payload 上限。
+// 分享是「单写多读」：分享者 PUT 自己的快照，接收者 GET 预览后导入自己账号。
+api.post('/api/share/new', syncNoStore, (req, res) => {
+  res.json({ code: shareStore.generateCode() });
+});
+
+api.get('/api/share/:code', syncNoStore, (req, res) => {
+  const code = req.params.code;
+  if (!shareStore.isValidCode(code)) return res.status(400).json({ error: 'invalid code' });
+  const d = shareStore.read(code);
+  if (!d) return res.json({ books: [], candidates: [] });
+  res.json({ books: d.books || [], candidates: d.candidates || [], updatedAt: d.updatedAt });
+});
+
+api.put('/api/share/:code', syncNoStore, express.json({ limit: '600kb' }), wrap(async (req, res) => {
+  const code = req.params.code;
+  if (!shareStore.isValidCode(code)) return res.status(400).json({ error: 'invalid code' });
+  const { books, candidates } = req.body || {};
+  const isBookList = (a) => Array.isArray(a) && a.every((b) => b && typeof b === 'object' && b.id);
+  if (!isBookList(books) || !isBookList(candidates)) return res.status(400).json({ error: 'bad payload' });
+  const r = shareStore.write(code, { books, candidates });
+  if (!r.ok) return res.status(400).json({ error: r.error || 'write failed' });
+  res.json({ ok: true });
 }));
 
 // ---------- 挂载：静态页面与接口统一挂在 BASE_PATH 下（默认 '' 即根路径）---------

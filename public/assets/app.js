@@ -36,6 +36,30 @@ async function api(path) {
   return (await apiRaw(path)).json();
 }
 
+// 复制到剪贴板：优先 Clipboard API（仅 https/localhost 等安全上下文可用），
+// 失败降级到 execCommand('copy')（http 部署、老浏览器也能用）。返回是否成功。
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* 走 execCommand 兜底 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 // id -> 源名映射：书架/备选/历史行内显示「来源」徽标用。
 // resolveDefaultSource 启动时填充；失败时退化为直接显示 src id。
 const SOURCE_NAME_MAP = {};
@@ -1830,10 +1854,23 @@ async function shelfPage() {
     if (idsBtn) {
       idsBtn.hidden = false;
       idsBtn.onclick = async () => {
-        const ids = currentSel.books.join(' ');
-        try { await navigator.clipboard.writeText(ids); } catch (e) {}
-        idsBtn.textContent = ids ? '已复制 ✓' : '无勾选';
-        setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 1500);
+        // 书架 + 备选的勾选都算「要分享的小说」
+        const ids = [...currentSel.books, ...currentSel.cands].join(' ');
+        if (!ids) { idsBtn.textContent = '无勾选'; setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 1500); return; }
+        const ok = await copyToClipboard(ids);
+        idsBtn.textContent = ok ? '已复制 ✓' : '手动复制下方 ID';
+        if (!ok) {
+          // 复制失败（如非 https）：展示内容让用户手动选择复制
+          let box = sheet.querySelector('#shareIdsManual');
+          if (!box) {
+            box = document.createElement('div');
+            box.id = 'shareIdsManual';
+            box.className = 'share-row';
+            sheet.querySelector('.sheet').appendChild(box);
+          }
+          box.innerHTML = `<textarea class="share-textarea" readonly>${esc(ids)}</textarea>`;
+        }
+        setTimeout(() => { idsBtn.textContent = '复制书籍ID'; }, 2000);
       };
     }
     const genBtn = bodyEl.querySelector('#shareGen');
@@ -1871,9 +1908,9 @@ async function shelfPage() {
         const copyBtn = sheet.querySelector('#shareCopy');
         copyBtn.hidden = false;
         copyBtn.onclick = async () => {
-          try { await navigator.clipboard.writeText(code); } catch (e) { /* 剪贴板失败静默 */ }
-          copyBtn.textContent = '已复制 ✓';
-          setTimeout(() => { copyBtn.textContent = '复制分享码'; }, 1500);
+          const ok = await copyToClipboard(code);
+          copyBtn.textContent = ok ? '已复制 ✓' : '复制失败，请手动选中复制';
+          setTimeout(() => { copyBtn.textContent = '复制分享码'; }, 2000);
         };
       } catch (err) {
         genBtn.disabled = false;
